@@ -94,6 +94,14 @@ body {
   gap: 16px;
 }
 
+/* Per-route container created by the router; lays out a screen's sections like #app itself. */
+#app > .screen {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
 h1,
 h2,
 h3,

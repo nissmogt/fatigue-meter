@@ -109,13 +109,19 @@ export class Router {
       }
       this.cleanup = null;
     }
-    this.root.replaceChildren();
+    // Each render gets its own container. A render that is still awaiting
+    // (e.g. loading settings) when the next navigation arrives keeps writing
+    // into a container that has already been detached, so stale screens can
+    // never appear next to the live one.
+    const container = document.createElement('div');
+    container.className = 'screen';
+    this.root.replaceChildren(container);
     this.root.scrollTop = 0;
     window.scrollTo(0, 0);
     const fullCtx: RouteContext = { ...ctx, params: m.params };
     for (const l of this.listeners) l(fullCtx);
     try {
-      const result = await m.route.render(this.root, fullCtx);
+      const result = await m.route.render(container, fullCtx);
       if (seq !== this.renderSeq) {
         // Navigated away while rendering; run the late cleanup immediately.
         if (typeof result === 'function') result();
@@ -124,10 +130,11 @@ export class Router {
       if (typeof result === 'function') this.cleanup = result;
     } catch (e) {
       console.error('screen render failed', e);
+      if (seq !== this.renderSeq) return;
       const pre = document.createElement('pre');
       pre.className = 'error';
       pre.textContent = `Screen failed to render: ${e instanceof Error ? e.message : String(e)}`;
-      this.root.replaceChildren(pre);
+      container.replaceChildren(pre);
     }
   }
 }
