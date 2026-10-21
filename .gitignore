@@ -1,0 +1,9 @@
+node_modules/
+dist/
+dev-dist/
+.vite/
+playwright-report/
+test-results/
+tests/e2e/.cache/
+*.log
+.DS_Store
