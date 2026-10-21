@@ -13,10 +13,21 @@
  * as-is; only the JSON export/import converts them to plain number arrays.
  */
 import { seriesFromJSON, seriesToJSON, type SampleSeriesJSON } from '../dsp/types';
-import type { Profile, Scores } from '../scoring/types';
+import type {
+  Comparison,
+  ComparisonLine,
+  IndexScore,
+  Level,
+  Profile,
+  ResultComments,
+  Scores,
+  SleepInfo,
+  VasAnswers,
+} from '../scoring/types';
 import {
   DEFAULT_SETTINGS,
   SCHEMA_VERSION,
+  type CaptureMeta,
   type ExportBundle,
   type MeasurementRecord,
   type MeasurementSummary,
@@ -42,7 +53,12 @@ export interface FatigueDb {
   getRecord(id: string): Promise<MeasurementRecord | undefined>;
   /** Newest first. */
   listSummaries(opts?: { limit?: number; before?: number }): Promise<MeasurementSummary[]>;
-  /** Scores of the newest n valid records (newest first), optionally created before a timestamp. */
+  /**
+   * Scores of the newest n valid, non-demo camera records (newest first),
+   * optionally created before a timestamp. Demo (synthetic) runs are stored
+   * and listed like any other record but never feed the previous-result
+   * comparison or the personal baseline.
+   */
   latestScores(n: number, before?: number): Promise<Scores[]>;
   countRecords(): Promise<number>;
   deleteRecord(id: string): Promise<void>;
@@ -234,6 +250,9 @@ class IdbFatigueDb implements FatigueDb {
    * Runs `body` inside one transaction and resolves after the transaction
    * committed. `body` must issue its requests synchronously (or from request
    * callbacks); awaiting anything else lets the transaction auto-commit.
+   * A transaction that finishes (commits or aborts) while `body` is still
+   * pending rejects instead of hanging, e.g. when a request callback threw
+   * before it could settle the body's promise.
    */
   private async run<T>(
     stores: readonly StoreName[],
@@ -243,9 +262,15 @@ class IdbFatigueDb implements FatigueDb {
     const db = await this.connection();
     const tx = db.transaction([...stores], mode);
     const done = txDone(tx);
+    // Invoked synchronously (not via a deferred .then) so the transaction is
+    // still active when the body issues its requests; a sync throw rejects.
+    const bodyPromise = new Promise<T>((resolve) => resolve(body(tx)));
+    const ended = done.then(() => {
+      throw new Error('IndexedDB transaction finished before its body settled');
+    });
     let result: T;
     try {
-      result = await body(tx);
+      result = await Promise.race([bodyPromise, ended]);
     } catch (e) {
       done.catch(() => undefined);
       try {
@@ -282,7 +307,8 @@ class IdbFatigueDb implements FatigueDb {
       const index = tx.objectStore(STORE_SUMMARIES).index(INDEX_CREATED_AT);
       return eachCursor(index.openCursor(beforeRange(before), 'prev'), (cursor) => {
         const s = cursor.value as MeasurementSummary;
-        if (before === undefined || s.createdAt < before) out.push(s);
+        // Summaries written before `kind` existed are camera runs.
+        if (before === undefined || s.createdAt < before) out.push(s.kind ? s : { ...s, kind: 'camera' });
         return out.length < max;
       }).then(() => out);
     });
@@ -296,7 +322,7 @@ class IdbFatigueDb implements FatigueDb {
       const index = tx.objectStore(STORE_RECORDS).index(INDEX_CREATED_AT);
       return eachCursor(index.openCursor(beforeRange(bound), 'prev'), (cursor) => {
         const r = cursor.value as MeasurementRecord;
-        const valid = r.analysis?.quality?.verdict !== 'fail' && r.scores != null;
+        const valid = r.capture?.kind !== 'synthetic' && r.analysis?.quality?.verdict !== 'fail' && r.scores != null;
         if (valid && (bound === undefined || r.createdAt < bound)) out.push(r.scores);
         return out.length < n;
       }).then(() => out);
@@ -392,7 +418,12 @@ class IdbFatigueDb implements FatigueDb {
     // file is rejected as a whole (a rejection, never a sync throw) and is
     // never half-imported.
     validateBundle(bundle);
-    const prepared = bundle.records.map((raw, i) => recordFromPlain(raw, i));
+    // Summaries are built here too: a throw in the async body is a rejection,
+    // whereas one inside an IDB callback would leave the import pending.
+    const prepared = bundle.records.map((raw, i) => {
+      const record = recordFromPlain(raw, i);
+      return { record, summary: summaryFromRecord(record) };
+    });
     const profile = mode === 'replace' ? profileOrNull(bundle.profile) : null;
     const settings = mode === 'replace' && bundle.settings ? mergeSettings(DEFAULT_SETTINGS, bundle.settings) : null;
 
@@ -407,26 +438,37 @@ class IdbFatigueDb implements FatigueDb {
           const write = (existing: Set<string>): void => {
             let added = 0;
             let skipped = 0;
-            for (const r of prepared) {
-              if (existing.has(r.id)) {
+            for (const { record, summary } of prepared) {
+              if (existing.has(record.id)) {
                 skipped++;
                 continue;
               }
-              existing.add(r.id); // a duplicate id inside the bundle itself is skipped too
-              records.put(r);
-              summaries.put(summaryFromRecord(r));
+              existing.add(record.id); // a duplicate id inside the bundle itself is skipped too
+              records.put(record);
+              summaries.put(summary);
               added++;
             }
             resolve({ added, skipped });
           };
+          // A throw inside an IDB callback escapes the executor; turn it into a rejection.
+          const guarded = (fn: () => void): void => {
+            try {
+              fn();
+            } catch (e) {
+              reject(toError(e));
+            }
+          };
           if (mode === 'replace') {
-            for (const name of ALL_STORES) tx.objectStore(name).clear();
-            if (profile) kv.put(profile, KV_PROFILE);
-            if (settings) kv.put(settings, KV_SETTINGS);
-            write(new Set());
+            guarded(() => {
+              for (const name of ALL_STORES) tx.objectStore(name).clear();
+              if (profile) kv.put(profile, KV_PROFILE);
+              if (settings) kv.put(settings, KV_SETTINGS);
+              write(new Set());
+            });
           } else {
             const keys = records.getAllKeys();
-            keys.onsuccess = () => write(new Set(keys.result.filter((k): k is string => typeof k === 'string')));
+            keys.onsuccess = () =>
+              guarded(() => write(new Set(keys.result.filter((k): k is string => typeof k === 'string'))));
             keys.onerror = () => reject(keys.error ?? new Error('key listing failed'));
           }
         }),
@@ -455,6 +497,7 @@ export function summaryFromRecord(r: MeasurementRecord): MeasurementSummary {
     rmssd: time?.rmssd ?? null,
     verdict: r.analysis.quality.verdict,
     vasMean: vasMean(r.vas),
+    kind: r.capture?.kind ?? 'camera',
   };
 }
 
@@ -552,21 +595,156 @@ function recordToPlain(r: MeasurementRecord): PlainRecord {
   return { ...r, series: r.series ? seriesToJSON(r.series) : null, analysis: analysisToPlain(r.analysis) };
 }
 
+/**
+ * Builds a record from its plain (JSON) form field by field, validating every
+ * field the app reads, so an edited, truncated or third-party file can never
+ * store a record that later blanks the result screen. Unknown fields are
+ * dropped. Throws a `record <id> ...` error; importAll turns that into a
+ * rejection of the whole bundle.
+ */
 function recordFromPlain(raw: unknown, index: number): MeasurementRecord {
   if (!isObject(raw)) throw new Error(`record ${index} is not an object`);
   if (typeof raw.id !== 'string' || raw.id.length === 0) throw new Error(`record ${index} has no id`);
-  if (typeof raw.createdAt !== 'number' || !Number.isFinite(raw.createdAt)) {
-    throw new Error(`record ${raw.id} has no createdAt`);
+  const id = raw.id;
+  const createdAt = raw.createdAt;
+  if (!isFiniteNumber(createdAt)) throw new Error(`record ${id} has no createdAt`);
+  const rawVersion = raw.schemaVersion;
+  if (isFiniteNumber(rawVersion) && rawVersion > SCHEMA_VERSION) {
+    throw new Error(`record ${id} has schema version ${rawVersion}, newer than supported version ${SCHEMA_VERSION}`);
   }
-  if (!isObject(raw.scores) || !isObject(raw.vas)) throw new Error(`record ${raw.id} lacks scores or vas`);
+  const schemaVersion = isFiniteNumber(rawVersion) ? rawVersion : SCHEMA_VERSION;
+  if (!isObject(raw.scores) || !isObject(raw.vas)) throw new Error(`record ${id} lacks scores or vas`);
   let series: MeasurementRecord['series'] = null;
   if (raw.series != null) {
-    if (!isSeriesJSON(raw.series)) throw new Error(`record ${raw.id} has a malformed series`);
+    if (!isSeriesJSON(raw.series)) throw new Error(`record ${id} has a malformed series`);
     series = seriesFromJSON(raw.series);
   }
-  const analysis = analysisFromPlain(raw.analysis);
-  const schemaVersion = typeof raw.schemaVersion === 'number' ? raw.schemaVersion : SCHEMA_VERSION;
-  return { ...(raw as unknown as MeasurementRecord), schemaVersion, series, analysis };
+  let analysis: StoredAnalysis;
+  try {
+    analysis = analysisFromPlain(raw.analysis);
+  } catch (e) {
+    throw new Error(`record ${id}: ${toError(e).message}`);
+  }
+  return {
+    id,
+    createdAt,
+    tz: stringOr(raw.tz, ''),
+    schemaVersion,
+    analysisVersion: stringOr(raw.analysisVersion, ''),
+    vas: vasFromPlain(raw.vas, id),
+    sleep: sleepFromPlain(raw.sleep, id),
+    profile: profileOrNull(raw.profile),
+    capture: captureFromPlain(raw.capture, id),
+    series,
+    analysis,
+    scores: scoresFromPlain(raw.scores, id),
+    comparison: comparisonFromPlain(raw.comparison, id),
+    comments: commentsFromPlain(raw.comments, id),
+  };
+}
+
+const VAS_KEYS: ReadonlyArray<keyof VasAnswers> = ['energy', 'relaxation', 'activity', 'motivation', 'sleep'];
+
+function vasFromPlain(v: Record<string, unknown>, id: string): VasAnswers {
+  const out: Partial<VasAnswers> = {};
+  for (const key of VAS_KEYS) {
+    const x = v[key];
+    if (!isFiniteNumber(x)) throw new Error(`record ${id} has malformed vas (${key})`);
+    out[key] = Math.min(100, Math.max(0, x));
+  }
+  return out as VasAnswers;
+}
+
+function sleepFromPlain(v: unknown, id: string): SleepInfo {
+  if (!isObject(v)) throw new Error(`record ${id} has malformed sleep`);
+  const { bedtime, wake, durationMin } = v;
+  if (!isStringOrNull(bedtime) || !isStringOrNull(wake) || !isFiniteOrNull(durationMin)) {
+    throw new Error(`record ${id} has malformed sleep`);
+  }
+  return { bedtime, wake, durationMin };
+}
+
+function captureFromPlain(v: unknown, id: string): CaptureMeta {
+  if (!isObject(v)) throw new Error(`record ${id} has malformed capture`);
+  const kind = v.kind;
+  if (kind !== 'camera' && kind !== 'synthetic') throw new Error(`record ${id} has malformed capture (kind)`);
+  const num = (x: unknown): number => (isFiniteNumber(x) ? x : 0);
+  return {
+    kind,
+    label: stringOr(v.label, ''),
+    width: num(v.width),
+    height: num(v.height),
+    nominalFps: num(v.nominalFps),
+    deliveredFps: num(v.deliveredFps),
+    torch: v.torch === true,
+    locked: v.locked === true,
+    durationS: num(v.durationS),
+    timeBase: stringOr(v.timeBase, ''),
+    userAgent: stringOr(v.userAgent, ''),
+  };
+}
+
+function indexFromPlain(v: unknown, key: IndexScore['key'], id: string): IndexScore {
+  const bad = (): Error => new Error(`record ${id} has malformed scores (${key})`);
+  if (!isObject(v)) throw bad();
+  const { value, z, level, label, provisional, basis } = v;
+  if (
+    !isFiniteOrNull(value) ||
+    !isFiniteOrNull(z) ||
+    !isLevelOrNull(level) ||
+    typeof label !== 'string' ||
+    typeof provisional !== 'boolean' ||
+    typeof basis !== 'string'
+  ) {
+    throw bad();
+  }
+  return { key, value, z, level, label, provisional, basis };
+}
+
+function scoresFromPlain(v: Record<string, unknown>, id: string): Scores {
+  const bad = (field: string): Error => new Error(`record ${id} has malformed scores (${field})`);
+  const fatigue = indexFromPlain(v.fatigue, 'fatigue', id);
+  const stress = indexFromPlain(v.stress, 'stress', id);
+  const recovery = indexFromPlain(v.recovery, 'recovery', id);
+  const { activityT, brainFatigue, stressT, autonomicAge, ageUsed, normsVersion, normExtrapolated } = v;
+  if (!isFiniteOrNull(activityT)) throw bad('activityT');
+  if (!isFiniteOrNull(brainFatigue)) throw bad('brainFatigue');
+  if (!isFiniteOrNull(stressT)) throw bad('stressT');
+  if (!isFiniteOrNull(autonomicAge)) throw bad('autonomicAge');
+  if (!isFiniteOrNull(ageUsed)) throw bad('ageUsed');
+  if (typeof normsVersion !== 'string') throw bad('normsVersion');
+  if (typeof normExtrapolated !== 'boolean') throw bad('normExtrapolated');
+  return { fatigue, stress, recovery, activityT, brainFatigue, stressT, autonomicAge, normsVersion, ageUsed, normExtrapolated };
+}
+
+function comparisonFromPlain(v: unknown, id: string): Comparison {
+  const bad = (field: string): Error => new Error(`record ${id} has malformed comparison (${field})`);
+  if (!isObject(v)) throw bad('object');
+  const { nHistory, usesPersonalBaseline, personalMeanT, personalSdT, lines } = v;
+  if (!isFiniteNumber(nHistory)) throw bad('nHistory');
+  if (typeof usesPersonalBaseline !== 'boolean') throw bad('usesPersonalBaseline');
+  if (!isFiniteOrNull(personalMeanT)) throw bad('personalMeanT');
+  if (!isFiniteOrNull(personalSdT)) throw bad('personalSdT');
+  if (!Array.isArray(lines)) throw bad('lines');
+  const out: ComparisonLine[] = lines.map((l: unknown, i) => {
+    if (!isObject(l)) throw bad(`lines[${i}]`);
+    const { kind, index, delta, text } = l;
+    if ((kind !== 'previous' && kind !== 'personal') || (index !== 'fatigue' && index !== 'stress')) {
+      throw bad(`lines[${i}]`);
+    }
+    if (!isFiniteNumber(delta) || typeof text !== 'string') throw bad(`lines[${i}]`);
+    return { kind, index, delta, text };
+  });
+  return { nHistory, usesPersonalBaseline, personalMeanT, personalSdT, lines: out };
+}
+
+function commentsFromPlain(v: unknown, id: string): ResultComments {
+  if (!isObject(v)) throw new Error(`record ${id} has malformed comments`);
+  const { headline, lines } = v;
+  if (typeof headline !== 'string' || !Array.isArray(lines) || !lines.every(isString)) {
+    throw new Error(`record ${id} has malformed comments`);
+  }
+  return { headline, lines: [...lines] };
 }
 
 function validateBundle(b: unknown): asserts b is ExportBundle {
@@ -580,11 +758,27 @@ function validateBundle(b: unknown): asserts b is ExportBundle {
   if (!Array.isArray(b.records)) throw new Error('export has no records array');
 }
 
+/**
+ * Every channel must have exactly as many finite numbers as `t` (seriesFromJSON
+ * sets `length = t.length`), so a ragged or non-numeric series can never be
+ * stored with a lying length and NaN samples.
+ */
 function isSeriesJSON(v: unknown): v is SampleSeriesJSON {
   if (!isObject(v)) return false;
-  const required = ['t', 'r', 'g', 'b', 'sat'];
-  if (!required.every((k) => isNumberList(v[k]))) return false;
-  return v.frame === undefined || isNumberList(v.frame);
+  const t = v.t;
+  if (!isNumberList(t)) return false;
+  const channels: unknown[] = [t, v.r, v.g, v.b, v.sat];
+  if (v.frame !== undefined) channels.push(v.frame);
+  return channels.every((c) => isFiniteNumberList(c, t.length));
+}
+
+function isFiniteNumberList(v: unknown, n: number): v is ArrayLike<number> {
+  if (!isNumberList(v) || v.length !== n) return false;
+  for (let i = 0; i < n; i++) {
+    const x: unknown = v[i];
+    if (!isFiniteNumber(x)) return false;
+  }
+  return true;
 }
 
 // --- Small IDB helpers -------------------------------------------------------------
@@ -638,6 +832,30 @@ function isObject(v: unknown): v is Record<string, unknown> {
 
 function isNumberList(v: unknown): v is ArrayLike<number> {
   return Array.isArray(v) || (ArrayBuffer.isView(v) && !(v instanceof DataView));
+}
+
+function isFiniteNumber(v: unknown): v is number {
+  return typeof v === 'number' && Number.isFinite(v);
+}
+
+function isFiniteOrNull(v: unknown): v is number | null {
+  return v === null || isFiniteNumber(v);
+}
+
+function isString(v: unknown): v is string {
+  return typeof v === 'string';
+}
+
+function isStringOrNull(v: unknown): v is string | null {
+  return v === null || typeof v === 'string';
+}
+
+function stringOr(v: unknown, fallback: string): string {
+  return typeof v === 'string' ? v : fallback;
+}
+
+function isLevelOrNull(v: unknown): v is Level | null {
+  return v === null || (Number.isInteger(v) && (v as number) >= 1 && (v as number) <= 5);
 }
 
 function toError(e: unknown): Error {

@@ -124,11 +124,16 @@ export function frequencyDomain(nn: NnResult, o: SpectrumOptions): HrvFreq | nul
   const hf = bandPower(f, p, o.hf[0], o.hf[1]);
   const tp = lf + hf;
   const lfHf = hf > 0 ? lf / hf : NaN;
-  // Respiratory estimate: dominant peak in 0.1–0.5 Hz.
+  // Respiratory estimate: strongest local maximum of the PSD in 0.1–0.5 Hz.
+  // A plain argmax returns the band edge whenever the skirt of an LF peak at
+  // or just below 0.1 Hz is taller than the respiratory peak (any LF/HF ≳ 1.5
+  // with a 0.1 Hz Mayer wave), which is not a peak at all. Neighbours come
+  // from the full grid, so breathing at exactly 0.10 Hz still counts.
   let respHz: number | null = null;
   let best = -Infinity;
-  for (let i = 0; i < nf; i++) {
-    if (f[i] >= 0.1 && f[i] <= 0.5 && p[i] > best) {
+  for (let i = 1; i < nf - 1; i++) {
+    if (f[i] < 0.1 || f[i] > 0.5) continue;
+    if (p[i] > p[i - 1] && p[i] >= p[i + 1] && p[i] > best) {
       best = p[i];
       respHz = f[i];
     }

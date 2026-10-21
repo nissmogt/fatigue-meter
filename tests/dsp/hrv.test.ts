@@ -3,18 +3,41 @@ import { bandPower, frequencyDomain, lombScargle, timeDomain, welchLikePsd } fro
 import { cleanIntervals } from '../../src/dsp/ibi';
 import { DEFAULT_ANALYSIS_OPTIONS } from '../../src/dsp/pipeline';
 
-function sinusoidBeats(durationS: number, rr0 = 0.9, aLf = 20, aHf = 30): Float64Array {
+function sinusoidBeats(durationS: number, rr0 = 0.9, aLf = 20, aHf = 30, fHf = 0.25): Float64Array {
   const beats: number[] = [];
   let t = 0.3;
   while (t < durationS) {
     beats.push(t);
-    const rr = rr0 * 1000 + aLf * Math.sin(2 * Math.PI * 0.1 * t + 0.4) + aHf * Math.sin(2 * Math.PI * 0.25 * t + 1.1);
+    const rr = rr0 * 1000 + aLf * Math.sin(2 * Math.PI * 0.1 * t + 0.4) + aHf * Math.sin(2 * Math.PI * fHf * t + 1.1);
     t += rr / 1000;
   }
   return Float64Array.from(beats);
 }
 
 describe('interval cleaning', () => {
+  it('rejects an ectopic couplet instead of merging it into a fabricated interval', () => {
+    // 60 beats at 1 s; beats 21 and 22 come early: intervals 600, 600, 1800 ms.
+    // Their sum (1200) is 20 % off the rhythm, so this is not a false extra
+    // peak; all three intervals must be rejected and RMSSD stay 0.
+    const beats = Array.from({ length: 60 }, (_, i) => i);
+    beats[21] = 20.6;
+    beats[22] = 21.2;
+    const nn = cleanIntervals(beats, DEFAULT_ANALYSIS_OPTIONS.nn);
+    expect(nn.ms.length).toBe(59);
+    const rejected: number[] = [];
+    for (let i = 0; i < nn.ms.length; i++) if (!nn.accepted[i]) rejected.push(i);
+    expect(rejected).toEqual([20, 21, 22]);
+    expect(Array.from(nn.ms.subarray(20, 23)).map(Math.round)).toEqual([600, 600, 1800]);
+    expect(timeDomain(nn)!.rmssd).toBe(0);
+    // A genuine false extra peak (350 + 650 = 1000 ms) is still merged away with zero rejections.
+    const extra = Array.from({ length: 60 }, (_, i) => i);
+    extra.splice(21, 0, 20.35);
+    const nn2 = cleanIntervals(extra, DEFAULT_ANALYSIS_OPTIONS.nn);
+    expect(nn2.ms.length).toBe(59);
+    expect(nn2.acceptedCount).toBe(59);
+    expect(timeDomain(nn2)!.rmssd).toBe(0);
+  });
+
   it('rejects out-of-range and outlying intervals', () => {
     const beats = [0, 0.9, 1.8, 2.7, 3.3, 4.5, 5.4, 6.3, 7.2, 9.5, 10.4];
     const nn = cleanIntervals(beats, DEFAULT_ANALYSIS_OPTIONS.nn);
@@ -74,8 +97,19 @@ describe('Lomb-Scargle', () => {
     const lfW = bandPower(w.f, w.p, 0.04, 0.15);
     const hfW = bandPower(w.f, w.p, 0.15, 0.4);
     expect(Math.abs(fd.hf - hfW) / hfW).toBeLessThan(0.15);
-    expect(Math.abs(fd.lf - lfW) / lfW).toBeLessThan(0.2);
+    expect(Math.abs(fd.lf - lfW) / lfW).toBeLessThan(0.15);
     expect(fd.lfBins).toBeCloseTo((nn.t[nn.t.length - 1] - nn.t[0]) * 0.11, 6);
+  });
+
+  it('reports the respiratory peak, not the band edge, when a 0.1 Hz Mayer wave dominates (120 s)', () => {
+    // LF/HF ≈ 4 with the LF tone at exactly 0.10 Hz: the skirt of that peak
+    // enters the 0.1–0.5 Hz search band taller than the 0.20 Hz breathing
+    // peak, so a plain argmax returned 0.101 Hz and flagged the stress reading.
+    const beats = sinusoidBeats(120, 0.9, 40, 20, 0.2);
+    const nn = cleanIntervals(beats, DEFAULT_ANALYSIS_OPTIONS.nn);
+    const fd = frequencyDomain(nn, DEFAULT_ANALYSIS_OPTIONS.spectrum)!;
+    expect(fd.respHz).toBeCloseTo(0.2, 2);
+    expect(Math.abs(fd.lfHf - 4) / 4).toBeLessThan(0.3);
   });
 
   it('unnormalised periodogram peaks at the injected frequency', () => {

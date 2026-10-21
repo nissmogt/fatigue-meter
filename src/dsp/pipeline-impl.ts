@@ -153,36 +153,73 @@ export function analyzePPG(series: SampleSeries, opts?: Partial<AnalysisOptions>
   if (k1 - k0 < fsU * 20) return empty(channel, choice.reason, fsSource, ['too-short']);
   const waveform = Float32Array.from(yDisp.subarray(k0, k1 + 1));
 
-  // Peaks on the whole band-passed series, then restricted to the window.
-  const allPeaks = detectSystolicPeaks(yDet, { fs: fsU, ...o.peaks });
+  // Peaks on the window plus a short margin, so the centred moving averages
+  // and the threshold offset (beta * mean(z)) see only the analysed data and
+  // not the placement / finger-off samples that serve as filter padding.
+  const margin = Math.round(Math.max(o.peaks.beatWindowS, o.peaks.minDelayS) * fsU);
+  const d0 = Math.max(0, k0 - margin);
+  const d1 = Math.min(yDet.length, k1 + 1 + margin);
+  const detPeaks = detectSystolicPeaks(yDet.subarray(d0, d1), { fs: fsU, ...o.peaks });
   const inWin: number[] = [];
-  for (let i = 0; i < allPeaks.length; i++) if (allPeaks[i] >= k0 && allPeaks[i] <= k1) inWin.push(allPeaks[i]);
+  for (let i = 0; i < detPeaks.length; i++) {
+    const p = detPeaks[i] + d0;
+    if (p >= k0 && p <= k1) inWin.push(p);
+  }
   const peakIdx = Int32Array.from(inWin);
   const aligned = alignPeaksToTemplate(yDet, peakIdx, fsU);
-  const peakTimes = new Float64Array(aligned.length);
-  for (let i = 0; i < aligned.length; i++) peakTimes[i] = u.t0 + aligned[i] / fsU;
+
+  // Per-beat template correlation (perBeat[i] belongs to peakIdx[i] / aligned[i]).
+  // Beats that do not resemble the mean beat are artefacts (noise-driven
+  // detections while the finger is on but pulseless, motion bursts); they are
+  // dropped before interval cleaning so that they can neither feed HRV nor
+  // mask a gap. Their neighbours then form a ~2xRR interval that the bounds /
+  // local-median rule rejects, which is the intended outcome.
+  const q = o.quality;
+  const tmpl = templateCorrelation(yDet, fsU, peakIdx);
+  const keptT: number[] = [];
+  const keptC: number[] = [];
+  for (let i = 0; i < aligned.length; i++) {
+    const c = tmpl.perBeat[i];
+    if (Number.isFinite(c) && c < q.minBeatCorr) continue; // artefact beat
+    keptT.push(u.t0 + aligned[i] / fsU);
+    keptC.push(c);
+  }
+  const peakTimes = Float64Array.from(keptT);
+  const beatCorr = Float64Array.from(keptC);
 
   const nn = cleanIntervals(peakTimes, o.nn);
   const time = timeDomain(nn);
   const freq = frequencyDomain(nn, o.spectrum);
 
+  // Longest stretch of the window not covered by an accepted interval,
+  // including the lead-in before the first and the tail after the last one.
+  // (Counting only runs of consecutive rejected intervals would let a single
+  // accepted noise beat reset the gap.)
+  let longestGapS = 0;
+  let cursor = startS;
+  for (let i = 0; i < nn.ms.length; i++) {
+    if (!nn.accepted[i]) continue;
+    const s = nn.t[i] - nn.ms[i] / 1000;
+    if (s - cursor > longestGapS) longestGapS = s - cursor;
+    if (nn.t[i] > cursor) cursor = nn.t[i];
+  }
+  if (endS - cursor > longestGapS) longestGapS = endS - cursor;
+
   // Quality indices over the window.
-  const tmpl = templateCorrelation(yDet, fsU, peakIdx);
   const winDet = yDet.subarray(k0, k1 + 1);
   const per = periodicity(winDet, fsU);
   const dc = Math.abs(mean(windowSeries.length ? channelOf(windowSeries, channel) : raw));
   const ac = robustRange(waveform);
   const perfusion = dc > 0 ? (100 * ac) / dc : 0;
-  const goodFraction = segmentGoodFraction(peakTimes, tmpl.perBeat, startS, endS, o.quality);
+  const goodFraction = segmentGoodFraction(peakTimes, beatCorr, startS, endS, q);
   const totalBeats = nn.ms.length;
   const acceptedFraction = totalBeats > 0 ? nn.acceptedCount / totalBeats : 0;
 
-  const q = o.quality;
   if (ac < 0.15 || per.r < 0.25) reasons.push('no-signal');
   if (mean(channelOf(windowSeries, channel)) > 252) reasons.push('saturated');
   if (nn.acceptedCount < q.minBeats) reasons.push('too-few-beats');
   if (acceptedFraction < q.timeOnlyAcceptedFraction) reasons.push('too-many-rejected');
-  if (nn.longestGapS > q.maxGapS) reasons.push('long-gap');
+  if (longestGapS > q.maxGapS) reasons.push('long-gap');
   if (gaps.dropFraction > q.maxDropFraction) reasons.push('dropped-frames');
   if (goodFraction < 0.5) reasons.push('low-quality');
   let verdict: QualityVerdict;
@@ -199,7 +236,7 @@ export function analyzePPG(series: SampleSeries, opts?: Partial<AnalysisOptions>
     acceptedBeats: nn.acceptedCount,
     totalBeats,
     acceptedFraction,
-    longestGapS: nn.longestGapS,
+    longestGapS,
     dropFraction: gaps.dropFraction,
     goodFraction,
     templateCorr: tmpl.templateCorr,
@@ -241,6 +278,7 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
     channel: ch,
     ac,
     dc,
+    templateCorr: NaN,
   });
   if (n === 0) return none('no-finger', 'g');
   const tEnd = series.t[n - 1];
@@ -303,6 +341,10 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
   const per = periodicity(yd, fs);
   const yDet = filtfilt(inv, butterworthBandpass(fs, 0.5, 8), fs);
   const peaks = detectSystolicPeaks(yDet, { fs, ...DEFAULT_ANALYSIS_OPTIONS.peaks });
+  // Same beat-template criterion as the final per-segment gate: autocorrelation
+  // >= 0.5 alone still passes signals (AC ~0.5 levels, cold finger) whose
+  // 60-s analysis is bound to fail 'low-quality'. NaN (< 3 beats) compares false.
+  const tmplCorr = templateCorrelation(yDet, fs, peaks).templateCorr;
   let hr: number | null = null;
   if (peaks.length >= 3) {
     const ibis: number[] = [];
@@ -311,7 +353,14 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
     if (md > 0) hr = 60 / md;
   }
   const good =
-    !recentStep && ac >= 0.25 && ac <= 60 && per.r >= 0.5 && hr !== null && hr >= 40 && hr <= 180;
+    !recentStep &&
+    ac >= 0.25 &&
+    ac <= 60 &&
+    per.r >= 0.5 &&
+    hr !== null &&
+    hr >= 40 &&
+    hr <= 180 &&
+    tmplCorr >= DEFAULT_ANALYSIS_OPTIONS.quality.minTemplateCorr;
   return {
     fingerOn: true,
     fingerReason: recentStep ? 'moving' : 'ok',
@@ -322,6 +371,7 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
     channel: ch,
     ac,
     dc: r,
+    templateCorr: tmplCorr,
   };
 }
 

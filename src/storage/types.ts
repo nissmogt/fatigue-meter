@@ -49,6 +49,8 @@ export interface MeasurementSummary {
   rmssd: number | null;
   verdict: string;
   vasMean: number;
+  /** Source of the recording; demo (synthetic) rows are shown but never feed comparisons. */
+  kind: SourceKind;
 }
 
 export interface Settings {

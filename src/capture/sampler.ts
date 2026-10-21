@@ -1,13 +1,19 @@
 /**
  * Frame loop: turns each presented video frame into one Sample (channel means
- * of the centre crop). Uses requestVideoFrameCallback where it exists, else a
- * requestAnimationFrame loop deduplicated on `currentTime`. The time base is
- * chosen once in start() and never mixed within a session.
+ * of the centre crop) through requestVideoFrameCallback. There is no
+ * requestAnimationFrame fallback: for a MediaStream, `currentTime` is a wall
+ * clock in Gecko and WebKit (the only engines that ever lacked rVFC), so a rAF
+ * loop cannot tell camera frames apart and would silently defeat the
+ * drop-frame gate and the low-fps guard. The time base is the frame's
+ * mediaTime, chosen once in start() and never mixed within a session.
  */
 import type { Sample } from '../dsp/types';
 import { CROP_FRACTION, GRID_SIZE, LOW_FPS_WINDOW_S, SATURATION_LEVEL } from './config';
+import { SourceError } from './source';
 
+/** Only 'rvfc' is produced; 'raf' remains in the union for records stored by earlier builds. */
 export type FrameLoop = 'rvfc' | 'raf';
+/** Only 'mediaTime' is produced; 'performance' remains for records stored by earlier builds. */
 export type TimeBase = 'mediaTime' | 'performance';
 
 export interface SamplerOptions {
@@ -17,7 +23,11 @@ export interface SamplerOptions {
 }
 
 export interface Sampler {
-  /** Picks the frame loop and time base (once per start) and begins delivering samples. */
+  /**
+   * Picks the frame loop and time base (once per start) and begins delivering
+   * samples. Throws SourceError('unsupported') when the element has no
+   * requestVideoFrameCallback.
+   */
   start(video: HTMLVideoElement, onSample: (s: Sample) => void): { loop: FrameLoop; timeBase: TimeBase };
   stop(): void;
   /** Frames delivered per second over the last LOW_FPS_WINDOW_S seconds (0 when stopped). */
@@ -27,6 +37,11 @@ export interface Sampler {
 
 export function createSampler(opts: SamplerOptions = {}): Sampler {
   return new FrameSampler(opts);
+}
+
+/** True when the element can report presented frames (Chrome 83, Safari 15.4, Firefox 132). */
+export function supportsFrameCallback(video: HTMLVideoElement): boolean {
+  return typeof (video as Partial<HTMLVideoElement>).requestVideoFrameCallback === 'function';
 }
 
 /** Ring size for frame timestamps: covers the fps window at up to 120 fps. */
@@ -40,9 +55,6 @@ class FrameSampler implements Sampler {
   private video: HTMLVideoElement | null = null;
   private onSample: ((s: Sample) => void) | null = null;
   private rvfcHandle = 0;
-  private rafHandle = 0;
-  private lastCurrentTime = -1;
-  private frameCounter = 0;
   private startedAt = 0;
   private readonly stamps = new Float64Array(STAMP_RING);
   private head = 0;
@@ -56,6 +68,9 @@ class FrameSampler implements Sampler {
   }
 
   start(video: HTMLVideoElement, onSample: (s: Sample) => void): { loop: FrameLoop; timeBase: TimeBase } {
+    if (!supportsFrameCallback(video)) {
+      throw new SourceError('unsupported', 'HTMLVideoElement.requestVideoFrameCallback is required');
+    }
     if (this.running) this.stop();
     if (!this.ctx) {
       // Created once; willReadFrequently keeps the backing store on the CPU
@@ -72,15 +87,9 @@ class FrameSampler implements Sampler {
     this.running = true;
     this.head = 0;
     this.count = 0;
-    this.lastCurrentTime = -1;
-    this.frameCounter = 0;
     this.startedAt = performance.now();
-    if (typeof (video as Partial<HTMLVideoElement>).requestVideoFrameCallback === 'function') {
-      this.rvfcHandle = video.requestVideoFrameCallback(this.onVideoFrame);
-      return { loop: 'rvfc', timeBase: 'mediaTime' };
-    }
-    this.rafHandle = requestAnimationFrame(this.onAnimationFrame);
-    return { loop: 'raf', timeBase: 'performance' };
+    this.rvfcHandle = video.requestVideoFrameCallback(this.onVideoFrame);
+    return { loop: 'rvfc', timeBase: 'mediaTime' };
   }
 
   stop(): void {
@@ -90,9 +99,7 @@ class FrameSampler implements Sampler {
     if (video && this.rvfcHandle && typeof video.cancelVideoFrameCallback === 'function') {
       video.cancelVideoFrameCallback(this.rvfcHandle);
     }
-    if (this.rafHandle) cancelAnimationFrame(this.rafHandle);
     this.rvfcHandle = 0;
-    this.rafHandle = 0;
     this.video = null;
     this.onSample = null;
   }
@@ -119,17 +126,6 @@ class FrameSampler implements Sampler {
     // Re-register first so a throw in process() cannot silently end the loop.
     this.rvfcHandle = video.requestVideoFrameCallback(this.onVideoFrame);
     this.process(meta.mediaTime, meta.presentedFrames);
-  };
-
-  private readonly onAnimationFrame = (): void => {
-    const video = this.video;
-    if (!this.running || !video) return;
-    this.rafHandle = requestAnimationFrame(this.onAnimationFrame);
-    const ct = video.currentTime;
-    if (ct === this.lastCurrentTime) return; // same frame still showing
-    this.lastCurrentTime = ct;
-    this.frameCounter++;
-    this.process(performance.now() / 1000, this.frameCounter);
   };
 
   private process(t: number, frame: number): void {

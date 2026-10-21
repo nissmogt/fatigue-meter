@@ -5,7 +5,7 @@
  */
 import type { Channel, SampleSeries } from './types';
 
-export const ANALYSIS_VERSION = '2026.10.1';
+export const ANALYSIS_VERSION = '2026.10.2';
 
 export type QualityVerdict = 'full' | 'time-only' | 'fail';
 
@@ -65,6 +65,12 @@ export interface QualityPolicy {
   hrMax: number;
   maxIntervalRatio: number;
   minTemplateCorr: number;
+  /**
+   * Beats whose template correlation is below this are artefacts and are
+   * excluded from interval cleaning and HRV (per-beat correlation is noisier
+   * than the segment mean, hence the lower bar than minTemplateCorr).
+   */
+  minBeatCorr: number;
 }
 
 export interface AnalysisOptions {
@@ -100,6 +106,7 @@ export const DEFAULT_ANALYSIS_OPTIONS: AnalysisOptions = {
     hrMax: 180,
     maxIntervalRatio: 2.2,
     minTemplateCorr: 0.86,
+    minBeatCorr: 0.8,
   },
 };
 
@@ -141,6 +148,7 @@ export interface Quality {
   acceptedBeats: number;
   totalBeats: number;
   acceptedFraction: number;
+  /** Longest stretch of the window not covered by an accepted interval (lead-in and tail included), seconds. */
   longestGapS: number;
   dropFraction: number;
   goodFraction: number;
@@ -162,7 +170,7 @@ export interface AnalysisResult {
   durationS: number;
   /** Band-passed display waveform over the window at fsUniform (positive = systole). */
   waveform: Float32Array;
-  /** Beat times in series seconds (refined). */
+  /** Beat times in series seconds (refined; artefact beats below quality.minBeatCorr are excluded). */
   peaks: Float64Array;
   nn: { t: Float64Array; ms: Float64Array; accepted: Uint8Array };
   time: HrvTime | null;
@@ -185,4 +193,6 @@ export interface LiveSnapshot {
   /** Peak-to-peak of the chosen channel over the window (8-bit units). */
   ac: number;
   dc: number;
+  /** Mean beat-template correlation over the window (NaN when fewer than 3 full beats). */
+  templateCorr: number;
 }

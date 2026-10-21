@@ -39,15 +39,17 @@
     --border: #cbd5e1;
     --text: #0f172a;
     --text-2: #334155;
-    --muted: #64748b;
-    --accent: #0284c7;
+    /* Light tokens are chosen for >= 4.5:1 WCAG AA on every surface they
+       are used on (--bg, --bg-elev, --bg-elev-2 and the badge/pill/button tints). */
+    --muted: #475569;
+    --accent: #0369a1;
     --accent-ink: #ffffff;
-    --accent-soft: rgba(2, 132, 199, 0.12);
-    --danger: #dc2626;
-    --danger-soft: rgba(220, 38, 38, 0.1);
-    --good: #15803d;
-    --warn: #b45309;
-    --wave: #0284c7;
+    --accent-soft: rgba(3, 105, 161, 0.12);
+    --danger: #b91c1c;
+    --danger-soft: rgba(185, 28, 28, 0.1);
+    --good: #166534;
+    --warn: #92400e;
+    --wave: #0369a1;
     --wave-grid: rgba(100, 116, 139, 0.35);
     --level-1: #15803d;
     --level-2: #4d7c0f;
@@ -324,12 +326,6 @@ a {
 .btn-large {
   min-height: 56px;
   font-size: 19px;
-}
-
-.btn-small {
-  min-height: 36px;
-  padding: 6px 12px;
-  font-size: 14px;
 }
 
 .btn-row {
@@ -914,6 +910,17 @@ video.ppg-hidden {
   height: 10px;
   border-radius: 50%;
   display: inline-block;
+}
+
+/* History row marker for demo (synthetic pulse) records. */
+.chip-demo {
+  padding: 1px 8px;
+  border-radius: 999px;
+  background: rgba(251, 191, 36, 0.16);
+  color: var(--warn);
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
 }
 
 .trend {

@@ -8,8 +8,8 @@ import { button, el, formatDurationMin, tid, topbar } from '../../ui/dom';
 export function renderSleep(root: HTMLElement, _ctx: RouteContext, router: Router): void {
   const session = getSession();
 
-  const bed = el('input', { type: 'time', id: 'sleep-bed', value: session.bedtime ?? '23:00', ...tid(TID.sleepBed) });
-  const wake = el('input', { type: 'time', id: 'sleep-wake', value: session.wake ?? '07:00', ...tid(TID.sleepWake) });
+  const bed = el('input', { type: 'time', id: 'sleep-bed', value: session.bedtime ?? '', ...tid(TID.sleepBed) });
+  const wake = el('input', { type: 'time', id: 'sleep-wake', value: session.wake ?? '', ...tid(TID.sleepWake) });
   const none = el('input', { type: 'checkbox', id: 'sleep-none', checked: session.didNotSleep, ...tid(TID.sleepNone) });
   const durationEl = el('p', { class: 'num-lg', 'aria-live': 'polite' });
 

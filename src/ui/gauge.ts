@@ -62,7 +62,8 @@ export function renderGauge(o: GaugeOptions): HTMLElement {
     viewBox: '0 0 200 118',
     class: 'gauge',
     role: 'img',
-    'aria-label': `${o.title}: ${o.valueText}, ${o.levelLabel}`,
+    // An unavailable score is announced with its explanation, not as two dashes.
+    'aria-label': o.level == null ? `${o.title}: ${o.note ?? o.levelLabel}` : `${o.title}: ${o.valueText}, ${o.levelLabel}`,
   });
 
   for (let i = 0; i < levels; i++) {

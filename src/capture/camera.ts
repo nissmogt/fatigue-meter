@@ -12,6 +12,7 @@ import {
   IDEAL_WIDTH,
   LOW_FPS_GRACE_S,
   LOW_FPS_LIMIT,
+  LOW_FPS_WINDOW_S,
   RECENT_SAMPLES_S,
   START_TIMEOUT_MS,
   TORCH_VERIFY_BASELINE_S,
@@ -19,7 +20,7 @@ import {
   TORCH_VERIFY_MIN_RISE,
   TORCH_VERIFY_SAMPLE_MS,
 } from './config';
-import { createSampler, type Sampler } from './sampler';
+import { createSampler, supportsFrameCallback, type Sampler } from './sampler';
 import {
   SourceError,
   type CameraDevice,
@@ -268,7 +269,8 @@ class CameraSource implements SampleSource {
     const tApplied = this.lastSampleT();
     const baseline = this.meanRed((t) => t >= tApplied - TORCH_VERIFY_BASELINE_S);
     try {
-      // Always attempted: iOS >= 17.4 honours it although getCapabilities() says nothing.
+      // Always attempted: Chromium rejects when the capability is absent;
+      // WebKit >= 17.4 honours it on a camera with a flash.
       await track.applyConstraints({ advanced: [{ torch: on }] });
     } catch {
       // Nothing changed physically. A torch that cannot be switched off goes
@@ -276,11 +278,20 @@ class CameraSource implements SampleSource {
       this.emit({ type: 'torch', on: this.torchOn, verified: false });
       return this.torchOn;
     }
-    this.torchOn = on;
-    const verified = await this.verifyTorch(on, baseline, tApplied);
+    // A resolved promise is not proof: Firefox (no `torch` member), WebKit < 17.4
+    // and WebKit on a camera without a flash drop the advanced set silently.
+    // Chromium rejects when the capability is absent and WebKit 17.4+ reports
+    // capabilities.torch === true only when the device has one, so a reported
+    // capability plus a resolved promise counts as confirmation; otherwise the
+    // brightness change is the only evidence (plan: promise + brightness jump).
+    // getSettings().torch is never consulted (not trustworthy, absent in WebKit).
+    this.torchOn = on; // belief for reapplyTorch()/teardown(); a wrong belief only costs a harmless no-op request
+    const rise = await this.verifyTorch(on, baseline, tApplied);
     if (this.state !== 'running') return false;
-    this.emit({ type: 'torch', on, verified });
-    return on;
+    const verified = rise || readCapabilities(track).torch === true;
+    const result = on && verified;
+    this.emit({ type: 'torch', on: result, verified: rise });
+    return result;
   }
 
   async lockControls(): Promise<LockResult> {
@@ -326,6 +337,11 @@ class CameraSource implements SampleSource {
     const md = typeof navigator !== 'undefined' ? navigator.mediaDevices : undefined;
     if (!md || typeof md.getUserMedia !== 'function') {
       throw new SourceError('unsupported', 'navigator.mediaDevices.getUserMedia is unavailable');
+    }
+    // Checked before the permission prompt: without requestVideoFrameCallback
+    // there is no way to observe camera frames (see sampler.ts).
+    if (!supportsFrameCallback(video)) {
+      throw new SourceError('unsupported', 'HTMLVideoElement.requestVideoFrameCallback is required');
     }
 
     let stream = await this.acquire(md, this.opts.deviceId);
@@ -511,7 +527,9 @@ class CameraSource implements SampleSource {
     if (this.state !== 'running' || this.interrupted) return;
     if (performance.now() - this.startedAt < LOW_FPS_GRACE_S * 1000) return;
     if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
-    if (this.sampler.deliveredFps() < LOW_FPS_LIMIT) this.interrupt('low-fps');
+    // One frame of slack: a source running exactly at the limit otherwise
+    // flips between n and n + 1 frames in the window and could abort.
+    if (this.sampler.deliveredFps() < LOW_FPS_LIMIT - 1 / LOW_FPS_WINDOW_S) this.interrupt('low-fps');
   }
 
   private reapplyTorch(): void {
@@ -523,11 +541,18 @@ class CameraSource implements SampleSource {
   }
 
   private async requestWakeLock(): Promise<void> {
+    const gen = this.gen;
     try {
       const wl = navigator.wakeLock;
       if (!wl || typeof wl.request !== 'function') return;
       if (this.wakeLock && !this.wakeLock.released) return;
-      this.wakeLock = await wl.request('screen');
+      const sentinel = await wl.request('screen');
+      if (gen !== this.gen || this.state === 'idle') {
+        // stop() ran while the request was pending; teardown found nothing to release.
+        sentinel.release().catch(() => {});
+        return;
+      }
+      this.wakeLock = sentinel;
     } catch {
       this.wakeLock = null; // non-fatal: the screen may just dim
     }

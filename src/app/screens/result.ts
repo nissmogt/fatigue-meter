@@ -3,6 +3,7 @@ import { TID } from '../testids';
 import type { RouteContext, Router } from '../router';
 import type { VasAnswers } from '../../scoring/types';
 import { VAS_KEYS } from '../../scoring/vas';
+import { PRECISE_MIN_S } from '../../scoring/score';
 import type { MeasurementRecord } from '../../storage/types';
 import { getDb } from '../state';
 import { renderGauge } from '../../ui/gauge';
@@ -34,9 +35,20 @@ export async function renderResult(root: HTMLElement, ctx: RouteContext, router:
   }
 
   const settings = await db.getSettings();
+  const isDemo = record.capture?.kind === 'synthetic';
+  let profileNow = record.profile;
+  if (profileNow == null) {
+    try {
+      profileNow = await db.getProfile();
+    } catch (e) {
+      console.warn('profile lookup failed', e);
+    }
+  }
   let previousVas: VasAnswers | null = null;
   try {
-    const [prev] = await db.listSummaries({ limit: 1, before: record.createdAt });
+    // Demo (synthetic) runs are never the "previous" measurement.
+    const candidates = await db.listSummaries({ limit: 5, before: record.createdAt });
+    const prev = candidates.find((s) => s.kind !== 'synthetic');
     if (prev) previousVas = (await db.getRecord(prev.id))?.vas ?? null;
   } catch (e) {
     console.warn('previous record lookup failed', e);
@@ -46,7 +58,9 @@ export async function renderResult(root: HTMLElement, ctx: RouteContext, router:
   const fatigueLevel = sc.fatigue.level;
   const stressLevel = sc.stress.level;
   const time = record.analysis.time;
-  const freq = record.analysis.freq;
+  // The pipeline stores a spectrum for time-only recordings too, but only a
+  // FULL verdict makes it trustworthy (mirrors score.ts).
+  const freq = record.analysis.quality.verdict === 'full' ? record.analysis.freq : null;
 
   const fatigueGauge = renderGauge({
     title: S.result.brainFatigue,
@@ -60,7 +74,13 @@ export async function renderResult(root: HTMLElement, ctx: RouteContext, router:
       fatigueLevel != null && sc.fatigue.provisional
         ? el('span', { class: 'badge' }, S.result.provisional)
         : null,
-    note: fatigueLevel == null ? S.result.needProfile : null,
+    // Scored without a profile: say so in the past tense once a birth year exists.
+    note:
+      fatigueLevel == null && record.profile == null
+        ? profileNow != null
+          ? S.result.scoredWithoutProfile
+          : S.result.needProfile
+        : null,
   });
 
   const stressGauge = renderGauge({
@@ -70,7 +90,15 @@ export async function renderResult(root: HTMLElement, ctx: RouteContext, router:
     levelLabel: stressLevel != null ? S.result.stressLevels[stressLevel - 1] : S.common.notAvailable,
     levelWord: S.common.level,
     levelTestId: TID.resultStressLevel,
-    badge: sc.stress.provisional ? el('span', { class: 'badge', ...tid(TID.resultProvisional) }, S.result.provisional) : null,
+    // Only a short recording earns the "(60 s)" hint; the other provisional
+    // reasons (few LF cells, low HR, slow breathing) apply to 120-s runs too.
+    badge: sc.stress.provisional
+      ? el(
+          'span',
+          { class: 'badge', ...tid(TID.resultProvisional) },
+          record.analysis.durationS < PRECISE_MIN_S ? S.result.provisionalShort : S.result.provisional,
+        )
+      : null,
     note: stressLevel == null ? S.result.stressUnavailable : null,
   });
 
@@ -140,6 +168,7 @@ export async function renderResult(root: HTMLElement, ctx: RouteContext, router:
 
   root.append(
     topbar(S.result.title),
+    ...(isDemo ? [el('p', { class: 'badge badge-demo' }, S.result.demo)] : []),
     el('p', { class: 'muted small' }, `${S.result.measuredAt}: ${formatDateTime(record.createdAt)}`),
     fatigueGauge,
     stressGauge,

@@ -14,7 +14,11 @@ export interface NnResult {
   /** 1 = accepted. */
   accepted: Uint8Array;
   acceptedCount: number;
-  /** Longest stretch of time not covered by accepted intervals (seconds). */
+  /**
+   * Longest run of consecutive rejected intervals (seconds). The pipeline's
+   * window-level gap (uncovered stretch incl. lead-in / tail) is computed in
+   * analyzePPG, since this measure is reset by any single accepted interval.
+   */
   longestGapS: number;
 }
 
@@ -30,8 +34,17 @@ export function intervalsFromPeaks(peakTimes: ArrayLike<number>): { t: Float64Ar
 }
 
 /**
+ * Relative deviation of a + b from the local rhythm that still counts as one
+ * beat. Deliberately tighter than NnOptions.tolerance: with the same 25 %
+ * window every merged interval would be accepted by construction, so an
+ * ectopic couplet (600 + 600 ms in a 1000 ms rhythm) would turn into an
+ * accepted, fabricated 1200 ms interval instead of two rejected ones.
+ */
+const MERGE_SUM_TOLERANCE = 0.15;
+
+/**
  * Remove false extra detections: two consecutive short intervals whose sum
- * matches the typical interval are merged back into one beat (Lipponen &
+ * matches the surrounding rhythm are merged back into one beat (Lipponen &
  * Tarvainen "extra beat" rule). Returns the cleaned beat times.
  */
 export function mergeExtraBeats(peakTimes: ArrayLike<number>, o: NnOptions): Float64Array {
@@ -44,11 +57,22 @@ export function mergeExtraBeats(peakTimes: ArrayLike<number>, o: NnOptions): Flo
   }
   if (ms.length < 3) return Float64Array.from(beats);
   const med = median(ms);
+  const h = Math.max(1, o.medianHalfWindow);
   let i = 1;
   while (i + 1 < beats.length) {
     const a = (beats[i] - beats[i - 1]) * 1000;
     const b = (beats[i + 1] - beats[i]) * 1000;
-    if (a < 0.75 * med && b < 0.75 * med && Math.abs(a + b - med) < o.tolerance * med) {
+    // A false extra peak leaves the true beats untouched, so a + b must match
+    // the surrounding rhythm closely; an ectopic couplet (two genuine short
+    // intervals) has no such constraint and is left for the local-median rule.
+    const neigh: number[] = [];
+    for (let k = i - h; k <= i + h + 1 && neigh.length < 2 * h; k++) {
+      if (k < 1 || k >= beats.length || k === i || k === i + 1) continue;
+      const d = (beats[k] - beats[k - 1]) * 1000;
+      if (d >= o.minMs && d <= o.maxMs) neigh.push(d);
+    }
+    const ref = neigh.length >= 2 ? median(neigh) : med;
+    if (a < 0.75 * ref && b < 0.75 * ref && Math.abs(a + b - ref) < MERGE_SUM_TOLERANCE * ref) {
       beats.splice(i, 1); // drop the false peak between the two short intervals
       continue;
     }

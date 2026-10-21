@@ -258,7 +258,10 @@ function personalText(zp: number): string {
 
 /**
  * Lines comparing the current scores with the previous record and, once
- * `history` holds at least `minN` valid records, with the personal baseline.
+ * `history` holds at least `minN` records with an autonomic-activity T, with
+ * the personal baseline. Records without a T (scored before a birth year was
+ * entered) cannot contribute to the baseline, so they are not counted towards
+ * `minN` either and `nHistory` reports only the contributing records.
  * `delta` is in the index's displayed units: brain-fatigue points for
  * 'fatigue' (positive = more fatigued), level steps for 'stress'.
  */
@@ -268,9 +271,9 @@ export function compareScores(
   history: readonly Scores[],
   minN = 30,
 ): Comparison {
-  const nHistory = history.length;
-  const usesPersonalBaseline = nHistory >= minN;
   const ts = history.map((h) => h.activityT).filter((t): t is number => t != null && Number.isFinite(t));
+  const nHistory = ts.length;
+  const usesPersonalBaseline = nHistory >= minN;
   let personalMeanT: number | null = null;
   let personalSdT: number | null = null;
   if (usesPersonalBaseline && ts.length >= 2) {

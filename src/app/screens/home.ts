@@ -9,7 +9,7 @@ export function renderHome(root: HTMLElement, _ctx: RouteContext, router: Router
     'div',
     { class: 'banner', role: 'status', hidden: !hasUpdate() },
     el('span', null, S.home.updateAvailable),
-    button(S.home.reload, () => void applyPendingUpdate(), { class: 'btn-small' }),
+    button(S.home.reload, () => void applyPendingUpdate()),
   );
   const unsubscribe = onStateChange(() => {
     banner.hidden = !hasUpdate();

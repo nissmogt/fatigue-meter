@@ -67,6 +67,7 @@ export function renderVas(root: HTMLElement, _ctx: RouteContext, router: Router)
     slider.input.focus({ preventScroll: true });
   }
 
-  show();
+  // Attach before the first show(): focus() on a detached slider is a no-op.
   root.append(topbar(S.vas.title), container);
+  show();
 }

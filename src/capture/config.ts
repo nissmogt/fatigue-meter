@@ -37,8 +37,14 @@ export const STABLE_MEAN_DELTA_MAX = 10;
 export const STABLE_STEP_MAX = 10;
 
 // --- Frame delivery -------------------------------------------------------------
-/** Delivered frames per second below which the measurement is aborted. */
-export const LOW_FPS_LIMIT = 20;
+/**
+ * Delivered frames per second below which the measurement is aborted. The DSP
+ * spline-upsamples from the measured source rate, so a steady 12–20 fps (what
+ * Chrome on Android delivers in a dark, torch-less scene: it picks the AE fps
+ * range with the lowest minimum) still scores accurately; below about 12 fps
+ * beat timing degrades (RMSSD error > 10 %, > 40 % at 8 fps), so that aborts.
+ */
+export const LOW_FPS_LIMIT = 12;
 /** Seconds over which delivered fps is measured. */
 export const LOW_FPS_WINDOW_S = 2;
 /** Seconds after start before the low-fps rule is enforced (camera warm-up). */

@@ -45,7 +45,7 @@ Any HTTPS tunnel to the dev server works, for example `npx localtunnel --port 51
 | Chrome / Edge on Android | yes | yes | yes (`exposureMode`, `focusMode`, `whiteBalanceMode: manual`) | Best signal. |
 | Samsung Internet | yes | usually | partial | Depends on the device. |
 | Safari on iOS 17.4+ (tab or home screen) | yes | yes | no | Torch via `applyConstraints`; the camera picker avoids the virtual Dual/Triple/Ultra Wide devices. |
-| Safari on iOS < 17.4 | yes | no | no | Measure in a bright room, or switch the flashlight on from Control Centre before starting. |
+| Safari on iOS < 17.4 | yes | no | no | Ambient-light mode: face a bright lamp or window so light shines through the fingertip (iOS refuses Control Centre flashlight while a page holds the camera). |
 | Firefox on Android | yes | no | no | Ambient-light mode only. |
 | Desktop browsers | webcam | no | no | Works for development; a webcam gives a weak signal. Use the demo in Settings. |
 
@@ -101,7 +101,7 @@ All norms are natural-log means with one standard deviation, evaluated at the us
 
 **Stress.** The sympathetic/parasympathetic balance LF/HF in five age-independent bands: < 0.8 → 1 (relaxed), 0.8–2.0 → 2 (normal), 2.0–3.5 → 3 (mildly elevated), 3.5–5.0 → 4 (elevated), ≥ 5.0 → 5 (high). An age- and sex-adjusted stress deviation value from ln (LF/HF) is stored and can be shown from Settings.
 
-**The 60-second caveat.** One minute resolves only a handful of independent spectral cells in the LF band (T × bandwidth ≈ 6.6), so LF and LF/HF from a 60-s recording are noisy. The stress level therefore carries a **provisional (60 s)** badge when the recording is shorter than 90 s, has fewer than 5 LF cells, a heart rate below 48 bpm, or a respiratory peak below 0.15 Hz (slow breathing pushes respiratory power into the LF band). With a TIME_DOMAIN_ONLY verdict no stress level is shown at all. The 120-s precise mode is the measurement length the method's research group uses clinically.
+**The 60-second caveat.** One minute resolves only a handful of independent spectral cells in the LF band (T × bandwidth ≈ 6.6), so LF and LF/HF from a 60-s recording are noisy. The stress level therefore carries a **provisional** badge when the recording is shorter than 90 s, has fewer than 5 LF cells, a heart rate below 48 bpm, or a respiratory peak below 0.15 Hz (slow breathing pushes respiratory power into the LF band). With a TIME_DOMAIN_ONLY verdict no stress level is shown at all. The 120-s precise mode is the measurement length the method's research group uses clinically.
 
 **Personal baseline.** The population norms are 5-minute literature values applied to 60-second measurements; they are a reference, not a truth. After **30 valid measurements** the comments compare each new result with the user's own mean ± SD of *T* instead of the population, and the app suggests repeating and using the median when consecutive results differ by more than 10 *T* points.
 
@@ -144,7 +144,7 @@ tests/e2e/                                Playwright: synthetic.spec.ts (fake cl
 - **E2E, synthetic tier** (`npm run test:e2e:synthetic`, seconds): the full UI flow with `#/measure?source=synthetic&seed=42` under Playwright's fake clock.
 - **E2E, camera tier** (`npm run test:e2e:camera`, about 90 s): the real camera code path. Global setup renders the synthetic pulse as a 64×48 Y4M video (`tests/e2e/.cache/finger.y4m`; uniform colour per frame with the red channel following the pulse), which Chromium's `--use-file-for-fake-video-capture` plays as a camera. Torch and lock requests are rejected by the fake device, as on many real phones. The test asserts the measured heart rate within ±3 bpm of the encoded 66.7 bpm.
 
-The first e2e run builds the app and serves `dist/` with `vite preview` on port 4173; set `CI=1` to force a fresh build and disable server reuse.
+Every e2e run builds the app and serves `dist/` with `vite preview` on `127.0.0.1:4173`, unless something is already listening there: locally Playwright reuses that server as-is (so stop any stale `npm run preview` first, or the tests exercise an outdated `dist/`); with `CI` set, reuse is disabled and an occupied port is an error. The fake-camera Y4M fixture is re-rendered by the global setup on every run (it takes well under a second), so it can never lag behind the generator.
 
 ## Disclaimer
 

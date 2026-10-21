@@ -408,6 +408,36 @@ describe('compareScores', () => {
     expect(p.text).toBe('Your autonomic activity is below your personal average.');
   });
 
+  it('ignores records without an activity T when counting the baseline', () => {
+    // Scans taken before a birth year was entered have no T: they can neither
+    // unlock the 30-record baseline nor be announced as part of it.
+    const noProfile = scoreMeasurement(input(), null, NOW);
+    expect(noProfile.activityT).toBeNull();
+    const mixed = [...historyOf(2, [-5, 5]), ...Array.from({ length: 28 }, () => noProfile)];
+    const c = compareScores(current, mixed[0], mixed);
+    expect(c.nHistory).toBe(2);
+    expect(c.usesPersonalBaseline).toBe(false);
+    expect(c.personalMeanT).toBeNull();
+    expect(c.personalSdT).toBeNull();
+    expect(c.lines.some((l) => l.kind === 'personal')).toBe(false);
+    // The previous-record lines still work against a no-profile record (stress only).
+    const vsNoProfile = compareScores(current, noProfile, mixed);
+    expect(vsNoProfile.lines.map((l) => l.index)).toEqual(['stress']);
+
+    const none = Array.from({ length: 30 }, () => noProfile);
+    const cNone = compareScores(current, none[0], none);
+    expect(cNone.nHistory).toBe(0);
+    expect(cNone.usesPersonalBaseline).toBe(false);
+    expect(cNone.personalMeanT).toBeNull();
+
+    // Thirty contributing records among the no-profile ones do unlock it.
+    const enough = [...historyOf(30, [-5, 0, 5]), ...Array.from({ length: 10 }, () => noProfile)];
+    const cEnough = compareScores(current, enough[0], enough);
+    expect(cEnough.nHistory).toBe(30);
+    expect(cEnough.usesPersonalBaseline).toBe(true);
+    expect(cEnough.personalMeanT).toBeCloseTo(50, 6);
+  });
+
   it('honours a custom minN and a flat history', () => {
     const h5 = historyOf(5);
     const c = compareScores(current, h5[0], h5, 5);

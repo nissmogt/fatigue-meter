@@ -6,6 +6,11 @@
  *
  *   idle -> starting -> placing-finger -> settling -> measuring -> analysing -> done
  *                                   ^__________________|                  \-> failed
+ *
+ * Settling: finger stable + live quality good for SETTLE_S, then (on a camera
+ * with lockable controls) the AE/AF/AWB locks are requested and AE_SETTLE_S
+ * more seconds pass before the window starts, so the brightness step the lock
+ * causes lands in the pre-window padding instead of inside the analysis.
  */
 import { S } from '../../strings';
 import { TID } from '../testids';
@@ -19,6 +24,7 @@ import { createCameraSource } from '../../capture/camera';
 import { createSyntheticSource } from '../../capture/synthetic';
 import { compareScores, scoreInputFromAnalysis, scoreMeasurement } from '../../scoring/score';
 import { buildComments } from '../../scoring/comments';
+import type { Scores } from '../../scoring/types';
 import { makeSleepInfo } from '../../scoring/vas';
 import { SCHEMA_VERSION, type CaptureMeta, type MeasurementRecord, type Settings } from '../../storage/types';
 import { newRecordId } from '../../storage/db';
@@ -30,15 +36,20 @@ import {
   setDiagnostics,
   sourceChoiceFromQuery,
   vasAnswersOrDefault,
+  type Diagnostics,
   type SourceChoice,
 } from '../state';
 import { createWaveform } from '../../ui/waveform';
 import { append, button, el, tid, topbar } from '../../ui/dom';
 
 type Phase = 'idle' | 'starting' | 'placing-finger' | 'settling' | 'measuring' | 'analysing' | 'done' | 'failed';
+type LockState = 'none' | 'pending' | 'done';
 
-const SETTLE_S = 2; // continuous good signal before the clock starts
+const SETTLE_S = 2; // continuous good signal before the locks are requested / the clock starts
+const AE_SETTLE_S = 1; // sample-time gap between the locks landing and the window start
+const LOCK_TIMEOUT_MS = 1500; // wall-clock cap on waiting for lockControls()
 const FINGER_OFF_S = 1; // finger off this long during measuring -> restart placement
+const RESTART_NOTICE_S = 3; // keep "finger moved" on screen this long (sample time) after a restart
 const POST_PAD_S = 2; // extra samples after the window (zero-phase filter padding)
 const LIVE_WINDOW_S = 8;
 const TICK_MS = 250;
@@ -106,12 +117,31 @@ function timeZone(): string {
   }
 }
 
+function errorName(e: unknown): string {
+  if (e instanceof DOMException) return e.name;
+  const name = (e as { name?: unknown } | null)?.name;
+  return typeof name === 'string' && name ? name : 'Error';
+}
+
 export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router: Router): Promise<Cleanup> {
   const choice = sourceChoiceFromQuery(ctx.query) ?? getSourceChoice();
+  // A navigation during the loads below supersedes this render: append
+  // nothing and never start a camera from it (the router's late cleanup
+  // cannot undo a DOM append). The listener fires at the start of every
+  // later render, including a same-path re-render from a double tap.
+  let disposed = false;
+  const offRoute = router.onChange(() => {
+    disposed = true;
+  });
   // Settings and profile are loaded up front so the Start tap calls
   // source.start() synchronously inside the user-gesture chain.
-  const db = await getDb();
-  const [settings, profile] = await Promise.all([db.getSettings(), db.getProfile()]);
+  const loaded = await (async () => {
+    const db = await getDb();
+    const [settings, profile] = await Promise.all([db.getSettings(), db.getProfile()]);
+    return { db, settings, profile };
+  })().finally(offRoute);
+  if (disposed) return () => {};
+  const { db, settings, profile } = loaded;
   const measureSeconds = settings.measureSeconds;
 
   // --- DOM ----------------------------------------------------------------
@@ -168,19 +198,27 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   let info: SourceInfo | null = null;
   let torchOn = false;
   let lock: LockResult | null = null;
-  let lockRequested = false;
+  let lockState: LockState = 'none';
+  /** Sample time at which the lock request settled; null until then (and after a finger-off). */
+  let lockDoneAt: number | null = null;
   let t0: number | null = null;
   let goodSince: number | null = null;
   let fingerOffSince: number | null = null;
+  /** Sample time until which the "finger moved" notice stays while the finger is off. */
+  let restartNoticeUntil: number | null = null;
   let padStartedAt = 0;
   let timer: number | null = null;
   let finishing = false;
-  let disposed = false;
   let runId = 0;
+
+  /** The live region is written only on a change: setting equal text would still re-announce it. */
+  function setStatus(text: string): void {
+    if (statusEl.textContent !== text) statusEl.textContent = text;
+  }
 
   function setPhase(p: Phase, status?: string): void {
     phase = p;
-    if (status !== undefined) statusEl.textContent = status;
+    if (status !== undefined) setStatus(status);
     root.dataset.phase = p;
     tipsEl.hidden = !(p === 'idle' || p === 'placing-finger' || p === 'failed');
   }
@@ -215,6 +253,8 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     t0 = null;
     goodSince = null;
     fingerOffSince = null;
+    lockDoneAt = null;
+    restartNoticeUntil = null;
     countdownEl.textContent = String(measureSeconds);
   }
 
@@ -238,13 +278,13 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
 
   // --- Flow ------------------------------------------------------------------
   async function start(): Promise<void> {
-    if (phase !== 'idle' && phase !== 'failed') return;
+    if (disposed || (phase !== 'idle' && phase !== 'failed')) return;
     const run = ++runId;
     samples = [];
     info = null;
     torchOn = false;
     lock = null;
-    lockRequested = false;
+    lockState = 'none';
     finishing = false;
     resetClock();
     errorEl.hidden = true;
@@ -267,7 +307,11 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
       await fail(startErrorMessage(e));
       return;
     }
-    if (run !== runId || disposed) return;
+    if (run !== runId || disposed) {
+      // Superseded while starting: never leave the stream running without a control.
+      void s.stop();
+      return;
+    }
 
     setPhase('placing-finger', S.measure.placeFinger);
     timer = window.setInterval(tick, TICK_MS);
@@ -302,7 +346,9 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
         break;
       case 'interrupted':
         if (phase === 'analysing') void finish(); // the window is complete; use what we have
-        else if (isActive()) void fail(S.measure.interrupted);
+        // A low frame rate is the one interruption the user can act on (more
+        // light); the dropped-frames gate text is the closest explanation.
+        else if (isActive()) void fail(S.measure.interrupted, e.reason === 'low-fps' ? ['dropped-frames'] : []);
         break;
       case 'error':
         if (isActive()) void fail(S.measure.errors[e.error.code] ?? S.measure.errors.unknown);
@@ -323,6 +369,12 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     waveform.draw(snap.wave);
   }
 
+  /** True when the source reports any lockable control (Chrome Android); iOS and the demo report none. */
+  function hasLockableControls(): boolean {
+    const c = info?.capabilities;
+    return !!c && (c.exposureLock || c.focusLock || c.whiteBalanceLock);
+  }
+
   function tick(): void {
     if (samples.length === 0) return;
     const last = samples[samples.length - 1];
@@ -332,17 +384,37 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     switch (phase) {
       case 'placing-finger':
       case 'settling': {
-        const ok = snap.fingerOn && snap.quality === 'good';
+        // While the locks are landing (and for one live window after) the
+        // brightness step they cause makes the live quality read 'poor', so
+        // the gate is finger presence alone; otherwise every lock would
+        // bounce the screen back to placement and cost ~10 s.
+        const lockRecent = lockState === 'pending' || (lockDoneAt !== null && last.t - lockDoneAt < LIVE_WINDOW_S);
+        const ok = snap.fingerOn && (lockRecent || snap.quality === 'good');
         if (!ok) {
           goodSince = null;
-          setPhase('placing-finger', fingerStatus(snap));
+          lockDoneAt = null;
+          const holdNotice = restartNoticeUntil !== null && !snap.fingerOn && last.t < restartNoticeUntil;
+          setPhase('placing-finger', holdNotice ? S.measure.fingerMoved : fingerStatus(snap));
           break;
         }
+        restartNoticeUntil = null;
         if (goodSince === null) {
           goodSince = last.t;
           setPhase('settling', S.measure.settling);
         }
-        if (last.t - goodSince >= SETTLE_S) beginMeasuring(last.t);
+        if (last.t - goodSince < SETTLE_S) break;
+        if (!hasLockableControls()) {
+          beginMeasuring(last.t); // nothing to lock, nothing to settle
+          break;
+        }
+        if (lockState === 'none') {
+          requestLocks();
+          break;
+        }
+        if (lockState === 'pending') break;
+        // Locked: either lockDoneAt ago (wait out the AE settle so the step
+        // is pre-window padding) or in an earlier attempt (no new step comes).
+        if (lockDoneAt === null || last.t - lockDoneAt >= AE_SETTLE_S) beginMeasuring(last.t);
         break;
       }
       case 'measuring': {
@@ -351,13 +423,13 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
         if (!snap.fingerOn) {
           if (fingerOffSince === null) fingerOffSince = last.t;
           if (last.t - fingerOffSince >= FINGER_OFF_S) {
-            restartPlacement();
+            restartPlacement(last.t);
             break;
           }
         } else {
           fingerOffSince = null;
         }
-        statusEl.textContent = fingerStatus(snap);
+        setStatus(fingerStatus(snap));
         if (elapsed >= measureSeconds) {
           countdownEl.textContent = '0';
           padStartedAt = performance.now();
@@ -376,28 +448,55 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     }
   }
 
+  /**
+   * Requests the AE/AF/AWB locks once per run, before the window. The lock
+   * step lands >= AE_SETTLE_S before t0 (a x0.5 step 0.5 s or more before the
+   * window leaves verdict/RMSSD/HF unchanged; inside the window it fails or
+   * biases the result). A slow or hanging request is capped by LOCK_TIMEOUT_MS.
+   */
+  function requestLocks(): void {
+    const s = source;
+    if (!s) return;
+    const run = runId;
+    lockState = 'pending';
+    const timeout = new Promise<void>((resolve) => window.setTimeout(resolve, LOCK_TIMEOUT_MS));
+    Promise.race([
+      s.lockControls().then((r) => {
+        lock = r;
+      }),
+      timeout,
+    ])
+      .catch(() => undefined)
+      .finally(() => {
+        if (run !== runId) return;
+        lockState = 'done';
+        lockDoneAt = samples.length ? samples[samples.length - 1].t : null;
+      });
+  }
+
   function beginMeasuring(t: number): void {
     t0 = t;
     fingerOffSince = null;
     setPhase('measuring', S.measure.holdStill);
-    if (!lockRequested && source) {
-      lockRequested = true;
-      source
-        .lockControls()
-        .then((r) => {
-          lock = r;
-        })
-        .catch(() => undefined);
-    }
   }
 
-  /** Finger off for too long: keep the samples collected so far, restart the clock. */
-  function restartPlacement(): void {
+  /**
+   * Finger off for too long: keep the samples collected so far, restart the
+   * clock. The locks stay as they are (a second request would put a second
+   * step into the next window). The notice is held by tick() while the finger
+   * is still off, up to RESTART_NOTICE_S.
+   */
+  function restartPlacement(t: number): void {
     resetClock();
+    restartNoticeUntil = t + RESTART_NOTICE_S;
     setPhase('placing-finger', S.measure.fingerMoved);
   }
 
-  async function fail(message: string, reasons: readonly GateReason[] = []): Promise<void> {
+  /**
+   * `diag` is the full diagnostics entry finish() already stored for this
+   * recording; the error is merged into it so fsSource / dropped frames survive.
+   */
+  async function fail(message: string, reasons: readonly GateReason[] = [], diag: Diagnostics | null = null): Promise<void> {
     runId++;
     stopTimer();
     const deliveredFps = source?.deliveredFps() ?? 0;
@@ -413,7 +512,9 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     retryBtn.hidden = false;
     cancelBtn.hidden = false;
     resetClock();
-    if (samples.length > 0) {
+    if (diag) {
+      setDiagnostics({ ...diag, error: message });
+    } else if (samples.length > 0) {
       setDiagnostics({
         at: Date.now(),
         capture: captureMeta(deliveredFps),
@@ -447,7 +548,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
       return;
     }
     const capture = captureMeta(deliveredFps);
-    setDiagnostics({
+    const diag: Diagnostics = {
       at: Date.now(),
       capture,
       verdict: analysis.quality.verdict,
@@ -455,23 +556,37 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
       fsSource: analysis.fsSource,
       dropFraction: analysis.quality.dropFraction,
       error: null,
-    });
+    };
+    setDiagnostics(diag);
     if (analysis.quality.verdict === 'fail') {
       finishing = false;
-      await fail(S.measure.failedTitle, analysis.quality.reasons);
+      await fail(S.measure.failedTitle, analysis.quality.reasons, diag);
       return;
     }
 
+    // Scoring and the record are pure computation; the save is a separate step
+    // so a storage failure is reported as such and never as an analysis failure.
+    let record: MeasurementRecord;
     try {
       const scores = scoreMeasurement(scoreInputFromAnalysis(analysis), profile);
-      const [previous, history] = await Promise.all([db.latestScores(1), db.latestScores(30)]);
+      // A demo (synthetic) run is never compared with the user's real history,
+      // and demo records are left out of the history that real runs compare with.
+      let previous: Scores[] = [];
+      let history: Scores[] = [];
+      if (capture.kind !== 'synthetic') {
+        try {
+          [previous, history] = await Promise.all([db.latestScores(1), db.latestScores(30)]);
+        } catch (e) {
+          console.warn('history lookup failed; comparison skipped', e); // a read failure must not discard the result
+        }
+      }
       const comparison = compareScores(scores, previous[0] ?? null, history);
       const session = getSession();
       const vas = vasAnswersOrDefault(session.vas);
       const sleep = session.didNotSleep ? makeSleepInfo(null, null) : makeSleepInfo(session.bedtime, session.wake);
       const comments = buildComments(scores, comparison, vas, sleep);
       const { waveform: _waveform, ...analysisStored } = analysis;
-      const record: MeasurementRecord = {
+      record = {
         id: newRecordId(),
         createdAt: Date.now(),
         tz: timeZone(),
@@ -487,16 +602,30 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
         comparison,
         comments,
       };
-      await db.putRecord(record);
-      if (disposed) return;
-      clearSession();
-      setPhase('done');
-      router.navigate(`/result/${encodeURIComponent(record.id)}`);
     } catch (e) {
-      console.error('scoring or saving failed', e);
+      console.error('scoring failed', e);
       finishing = false;
-      await fail(S.measure.analysisFailed);
+      await fail(S.measure.analysisFailed, [], diag);
+      return;
     }
+
+    try {
+      await db.putRecord(record);
+    } catch (e) {
+      const name = errorName(e); // QuotaExceededError (storage full) vs VersionError (another tab upgraded)
+      console.error(`saving the measurement failed (${name})`, e);
+      finishing = false;
+      // TODO(strings): a storage-specific message (free up space / export and
+      // delete old measurements from History, with a QuotaExceededError variant)
+      // belongs here; until it exists the generic error keeps this from reading
+      // as an analysis failure.
+      await fail(S.common.error, [], diag);
+      return;
+    }
+    if (disposed) return;
+    clearSession();
+    setPhase('done');
+    router.navigate(`/result/${encodeURIComponent(record.id)}`);
   }
 
   async function cancel(): Promise<void> {

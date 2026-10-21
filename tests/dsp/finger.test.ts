@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { classifyFinger, fingerPresent, fingerState, isStable, luminance, redRatio } from '../../src/capture/finger';
-import { STABLE_MEAN_DELTA_MAX, STABLE_STEP_MAX } from '../../src/capture/config';
+import { LOW_FPS_LIMIT, STABLE_MEAN_DELTA_MAX, STABLE_STEP_MAX } from '../../src/capture/config';
+import { analyzePPG } from '../../src/dsp/pipeline-impl';
 import { generateSynthetic } from '../../src/dsp/synthetic';
 import { fromSeries, type Sample } from '../../src/dsp/types';
 
@@ -112,5 +113,34 @@ describe('fingerState', () => {
     expect(fingerState(moving, 'torch')).toEqual({ on: true, reason: 'moving' });
     const lifted = [...flat(60, 180), mk(95, 100, 105, 0, 2)];
     expect(fingerState(lifted, 'torch')).toEqual({ on: false, reason: 'no-finger' });
+  });
+});
+
+describe('LOW_FPS_LIMIT (capture/config) is a rate the DSP still scores correctly', () => {
+  // The camera source aborts below this delivered rate (Chrome on Android drops
+  // to 12-20 fps in a dark torch-less scene); the limit must therefore sit at a
+  // rate the pipeline still analyses accurately, not at the nominal 30 fps.
+  const START = 3;
+  const END = 63;
+
+  function truth(beatTimes: Float64Array) {
+    const inside = Array.from(beatTimes).filter((t) => t >= START - 0.05 && t <= END + 0.05);
+    const ms: number[] = [];
+    for (let i = 1; i < inside.length; i++) ms.push((inside[i] - inside[i - 1]) * 1000);
+    const mean = ms.reduce((a, b) => a + b, 0) / ms.length;
+    let sq = 0;
+    for (let i = 1; i < ms.length; i++) sq += (ms[i] - ms[i - 1]) ** 2;
+    return { hr: 60000 / mean, rmssd: Math.sqrt(sq / (ms.length - 1)) };
+  }
+
+  it.each([1, 2, 3])('a clean recording at exactly the limit passes the gate (seed %i)', (seed) => {
+    const syn = generateSynthetic({ seed, durationS: 70, fps: LOW_FPS_LIMIT });
+    const res = analyzePPG(syn.series, { window: { startS: START, endS: END } });
+    const t = truth(syn.beatTimes);
+    expect(res.fsSource).toBeCloseTo(LOW_FPS_LIMIT, 0);
+    expect(res.quality.verdict).toBe('full');
+    expect(res.time).not.toBeNull();
+    expect(Math.abs(res.time!.meanHR - t.hr)).toBeLessThan(0.5);
+    expect(Math.abs(res.time!.rmssd - t.rmssd) / t.rmssd).toBeLessThan(0.2);
   });
 });

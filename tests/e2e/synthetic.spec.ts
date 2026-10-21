@@ -10,9 +10,29 @@ import { TID } from '../../src/app/testids';
 const BIRTH_YEAR = '1985';
 const VAS_VALUE = '60';
 const RESULT_URL = /#\/result\//;
-const LEVEL = /^[1-5]$/;
-// The stress gauge prints an empty level when the spectrum was not reliable.
-const LEVEL_OR_NONE = /^(?:[1-5]|—|Not available)?$/;
+
+/**
+ * The fake clock is pinned so the age-normed fatigue level cannot drift with
+ * the calendar: with birth year 1985 the user is 41 at this date. (T rises
+ * about 0.35 per year of age for this pulse; on the real clock the expected
+ * level would flip from 2 to 1 in 2042.)
+ */
+const CLOCK_DATE = new Date('2026-01-15T09:00:00');
+
+/**
+ * Exact expectations for seed 42, birth year 1985 at CLOCK_DATE. Derived by
+ * running generateSynthetic({ seed: 42, fps: 30, durationS: 140 }) through
+ * analyzePPG with a 60-s window and scoreMeasurement (sex unspecified), as
+ * measure.ts does, for every window start from 2 s to 15 s in 0.1-s steps
+ * (the UI starts the window at about 5–7 s, after the settle gate): verdict
+ * 'full' every time; brain fatigue 47.1–48.0 (T 52.0–52.9, basis
+ * lnHF+lnRMSSD) → fatigue level 2; LF/HF 0.44–0.49 → stress level 1,
+ * provisional because 60 s < 90 s; heart rate 66.7 bpm. An intentional DSP
+ * or norms change that moves these values is updated here deliberately.
+ */
+const EXPECTED_FATIGUE_LEVEL = '2';
+const EXPECTED_STRESS_LEVEL = '1';
+const EXPECTED_FATIGUE_SCORE = { min: 46, max: 49 };
 
 /** Home → profile (first run only) → five VAS questions → sleep times → measure. */
 async function walkToMeasure(page: Page): Promise<void> {
@@ -65,7 +85,7 @@ async function urlOrMeasureError(page: Page): Promise<string> {
 
 test('synthetic source: a full measurement under a fake clock produces a scored result', async ({ page }) => {
   // Installed before navigation so the app's timers and performance.now() are fake from the start.
-  await page.clock.install();
+  await page.clock.install({ time: CLOCK_DATE });
 
   await walkToMeasure(page);
   await page.goto('/#/measure?source=synthetic&seed=42');
@@ -86,8 +106,12 @@ test('synthetic source: a full measurement under a fake clock produces a scored 
     )
     .toMatch(RESULT_URL);
 
-  await expect(page.getByTestId(TID.resultFatigueLevel)).toHaveText(LEVEL);
-  await expect(page.getByTestId(TID.resultStressLevel)).toHaveText(LEVEL_OR_NONE);
+  await expect(page.getByTestId(TID.resultFatigueLevel)).toHaveText(EXPECTED_FATIGUE_LEVEL);
+  await expect(page.getByTestId(TID.resultStressLevel)).toHaveText(EXPECTED_STRESS_LEVEL);
+  await expect(page.getByTestId(TID.resultProvisional)).toBeVisible();
+  const score = Number(await page.getByTestId(TID.resultFatigueScore).textContent());
+  expect(score, 'brain fatigue score for seed 42').toBeGreaterThanOrEqual(EXPECTED_FATIGUE_SCORE.min);
+  expect(score).toBeLessThanOrEqual(EXPECTED_FATIGUE_SCORE.max);
   await expect(page.getByTestId(TID.resultRadar)).toBeVisible();
 
   await page.goto('/#/history');

@@ -1,6 +1,7 @@
 import 'fake-indexeddb/auto';
 import { IDBFactory } from 'fake-indexeddb';
 import { describe, expect, it } from 'vitest';
+import type { SourceKind } from '../../src/capture/source';
 import { ANALYSIS_VERSION, type QualityVerdict } from '../../src/dsp/pipeline';
 import { generateSynthetic } from '../../src/dsp/synthetic';
 import type { Level, Profile, Scores } from '../../src/scoring/types';
@@ -29,6 +30,8 @@ interface RecordOverrides {
   brainFatigue?: number | null;
   seed?: number;
   withSeries?: boolean;
+  /** Source of the recording; defaults to a real camera run (demo runs are 'synthetic'). */
+  kind?: SourceKind;
 }
 
 function makeScores(o: RecordOverrides): Scores {
@@ -115,8 +118,8 @@ function makeRecord(o: RecordOverrides = {}): MeasurementRecord {
     sleep: { bedtime: '23:30', wake: '07:00', durationMin: 450 },
     profile: PROFILE,
     capture: {
-      kind: 'synthetic',
-      label: 'Synthetic',
+      kind: o.kind ?? 'camera',
+      label: o.kind === 'synthetic' ? 'Synthetic PPG' : 'Back camera',
       width: 320,
       height: 240,
       nominalFps: 30,
@@ -146,6 +149,23 @@ function seriesArrays(r: MeasurementRecord): number[][] {
   const s = r.series;
   if (!s) throw new Error('fixture has no series');
   return [s.t, s.r, s.g, s.b, s.sat, s.frame].map((a) => Array.from(a));
+}
+
+/** Rejects with a distinct error if `p` never settles, so a hang fails with a clear message instead of the suite timeout. */
+function settlesWithin<T>(p: Promise<T>, ms = 2000): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`promise did not settle within ${ms} ms (hang)`)), ms);
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e: unknown) => {
+        clearTimeout(timer);
+        reject(e);
+      },
+    );
+  });
 }
 
 // --- Tests ----------------------------------------------------------------------------
@@ -227,7 +247,9 @@ describe('records', () => {
       rmssd: 25,
       verdict: 'full',
       vasMean: 50,
+      kind: 'camera',
     });
+    expect(summaryFromRecord(makeRecord({ kind: 'synthetic' })).kind).toBe('synthetic');
     const failed = summaryFromRecord(makeRecord({ verdict: 'fail', fatigueLevel: null, brainFatigue: null }));
     expect(failed.meanHR).toBeNull();
     expect(failed.rmssd).toBeNull();
@@ -257,6 +279,29 @@ describe('listSummaries', () => {
     expect(all.map((s) => s.id)).toEqual(['d', 'c', 'b', 'a']);
   });
 
+  it('reads a summary row stored before the kind field existed as a camera run', async () => {
+    const factory = new IDBFactory();
+    const db = await openDb({ factory, name: 'legacy' });
+    await db.putRecord(makeRecord({ id: 'old' }));
+    // Overwrite the summary row through a second connection, without `kind`.
+    const raw = await new Promise<IDBDatabase>((resolve, reject) => {
+      const req = factory.open('legacy', DB_VERSION);
+      req.onsuccess = () => resolve(req.result);
+      req.onerror = () => reject(req.error);
+    });
+    await new Promise<void>((resolve, reject) => {
+      const tx = raw.transaction('summaries', 'readwrite');
+      const { kind: _kind, ...legacy } = summaryFromRecord(makeRecord({ id: 'old' }));
+      tx.objectStore('summaries').put(legacy);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => reject(tx.error);
+    });
+    raw.close();
+    const [s] = await db.listSummaries();
+    expect(s.id).toBe('old');
+    expect(s.kind).toBe('camera');
+  });
+
   it('honours limit and an exclusive before bound', async () => {
     const db = await seeded();
     expect((await db.listSummaries({ limit: 2 })).map((s) => s.id)).toEqual(['d', 'c']);
@@ -281,6 +326,24 @@ describe('latestScores', () => {
     expect((await db.latestScores(10, T0 + 4)).map((s) => s.brainFatigue)).toEqual([42, 41]);
     expect((await db.latestScores(10, T0 + 3)).map((s) => s.brainFatigue)).toEqual([41]);
     expect(await db.latestScores(0)).toEqual([]);
+  });
+
+  it('skips demo (synthetic) records, which are still stored, counted and listed', async () => {
+    const db = await freshDb();
+    await db.putRecord(makeRecord({ id: 'real1', createdAt: T0 + 1, brainFatigue: 41 }));
+    await db.putRecord(makeRecord({ id: 'demo', createdAt: T0 + 2, brainFatigue: 62, kind: 'synthetic' }));
+    await db.putRecord(makeRecord({ id: 'real2', createdAt: T0 + 3, brainFatigue: 43 }));
+
+    // The demo never becomes "previous" nor part of the baseline history.
+    expect((await db.latestScores(1)).map((s) => s.brainFatigue)).toEqual([43]);
+    expect((await db.latestScores(30)).map((s) => s.brainFatigue)).toEqual([43, 41]);
+    expect((await db.latestScores(30, T0 + 3)).map((s) => s.brainFatigue)).toEqual([41]);
+    // ...but it is a stored record like any other: counted, listed and marked.
+    expect(await db.countRecords()).toBe(3);
+    const summaries = await db.listSummaries();
+    expect(summaries.map((s) => s.id)).toEqual(['real2', 'demo', 'real1']);
+    expect(summaries.map((s) => s.kind)).toEqual(['camera', 'synthetic', 'camera']);
+    expect((await db.getRecord('demo'))?.capture.kind).toBe('synthetic');
   });
 });
 
@@ -384,6 +447,8 @@ describe('export and import', () => {
 
     const got1 = await dst.getRecord('one');
     expect(got1).toBeDefined();
+    // Field-by-field reconstruction must drop nothing the app writes.
+    expect(got1).toEqual(r1);
     expect(seriesArrays(got1!)).toEqual(seriesArrays(r1));
     expect(got1!.series!.t).toBeInstanceOf(Float64Array);
     expect(got1!.series!.r).toBeInstanceOf(Float32Array);
@@ -440,9 +505,69 @@ describe('export and import', () => {
     await expect(db.importAll({} as ExportBundle, 'merge')).rejects.toThrow();
     await expect(db.importAll(null as unknown as ExportBundle, 'merge')).rejects.toThrow();
     await expect(db.importAll({ ...good, records: [{ id: 'x' }] } as unknown as ExportBundle, 'replace')).rejects.toThrow(/createdAt/);
+    // Merge mode validates in the same place as replace mode: a rejection, never a hang.
+    await expect(
+      settlesWithin(db.importAll({ ...good, records: [{ ...good.records[0], id: 'bad', scores: {} }] } as unknown as ExportBundle, 'merge')),
+    ).rejects.toThrow(/scores/);
 
     expect(await db.countRecords()).toBe(1);
     expect(await db.getRecord('keep')).toBeDefined();
+  });
+
+  it('rejects malformed records in merge mode without hanging or writing', async () => {
+    const db = await freshDb();
+    await db.putRecord(makeRecord({ id: 'keep' }));
+    const good = JSON.parse(JSON.stringify(await db.exportAll())) as ExportBundle;
+    const template = good.records[0];
+    const attempt = (record: unknown, pattern: RegExp) =>
+      expect(settlesWithin(db.importAll({ ...good, records: [record] } as ExportBundle, 'merge'))).rejects.toThrow(pattern);
+
+    // The reviewer's partial record: only four fields, everything the result screen reads is missing.
+    await attempt(
+      {
+        id: 'y',
+        createdAt: 2,
+        vas: { energy: 1 },
+        scores: { fatigue: { level: 3 }, stress: { level: 2, value: 1 }, brainFatigue: 50 },
+        analysis: { quality: { verdict: 'full' } },
+      },
+      /record y has malformed vas/,
+    );
+    await attempt({ ...template, id: 'a', scores: {} }, /record a has malformed scores \(fatigue\)/);
+    await attempt({ ...template, id: 'b', scores: { ...template.scores, stress: undefined } }, /malformed scores \(stress\)/);
+    await attempt({ ...template, id: 'c', scores: { ...template.scores, fatigue: { ...template.scores.fatigue, level: 7 } } }, /scores \(fatigue\)/);
+    await attempt({ ...template, id: 'd', comments: undefined }, /malformed comments/);
+    await attempt({ ...template, id: 'e', comments: { headline: 'x', lines: ['ok', 3] } }, /malformed comments/);
+    await attempt({ ...template, id: 'f', comparison: { ...template.comparison, lines: [{ kind: 'nope' }] } }, /comparison \(lines\[0\]\)/);
+    await attempt({ ...template, id: 'g', sleep: { bedtime: 1, wake: null, durationMin: null } }, /malformed sleep/);
+    await attempt({ ...template, id: 'h', capture: { ...template.capture, kind: 'webcam' } }, /capture \(kind\)/);
+    await attempt({ ...template, id: 'i', vas: { ...template.vas, sleep: 'tired' } }, /vas \(sleep\)/);
+    await attempt({ ...template, id: 'j', schemaVersion: SCHEMA_VERSION + 1 }, /newer than supported/);
+    await attempt({ ...template, id: 'k', analysis: { time: null } }, /record k: analysis is malformed/);
+
+    // Ragged or non-numeric series would store a lying length and NaN samples.
+    await attempt(
+      { ...template, id: 's1', series: { t: [0, 0.033, 0.066, 0.1], r: [1], g: ['x', {}, null], b: [], sat: [] } },
+      /malformed series/,
+    );
+    await attempt(
+      { ...template, id: 's2', series: { ...template.series, r: template.series!.r.slice(1) } },
+      /malformed series/,
+    );
+    await attempt(
+      { ...template, id: 's3', series: { ...template.series, g: template.series!.g.map((x, i) => (i === 5 ? Number.NaN : x)) } },
+      /malformed series/,
+    );
+    await attempt({ ...template, id: 's4', series: { ...template.series, frame: [1, 2] } }, /malformed series/);
+
+    expect(await db.countRecords()).toBe(1);
+    expect((await db.listSummaries()).map((s) => s.id)).toEqual(['keep']);
+
+    // Lenient where the app tolerates it: a record without a series or frame array still imports.
+    const { frame: _frame, ...noFrame } = template.series!;
+    expect(await db.importAll({ ...good, records: [{ ...template, id: 'ok1', series: null }, { ...template, id: 'ok2', series: noFrame }] } as ExportBundle, 'merge')).toEqual({ added: 2, skipped: 0 });
+    expect((await db.getRecord('ok2'))!.series!.frame).toEqual(new Uint32Array(template.series!.t.length));
+    expect(await db.countRecords()).toBe(3);
   });
 });
 

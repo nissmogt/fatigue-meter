@@ -18,7 +18,8 @@ function renderTrend(items: MeasurementSummary[]): HTMLElement {
   const x = (i: number) => (n === 1 ? w / 2 : padX + (i / (n - 1)) * (w - 2 * padX));
   const y = (v: number) => padY + (1 - Math.min(100, Math.max(0, v)) / 100) * (h - 2 * padY);
 
-  const chart = svg('svg', { viewBox: `0 0 ${w} ${h}`, class: 'trend', role: 'img', 'aria-label': fmt(S.history.trend, { n }) });
+  const title = n === 1 ? S.history.trendOne : fmt(S.history.trend, { n });
+  const chart = svg('svg', { viewBox: `0 0 ${w} ${h}`, class: 'trend', role: 'img', 'aria-label': title });
   chart.appendChild(svg('line', { x1: 0, x2: w, y1: y(50).toFixed(1), y2: y(50).toFixed(1), class: 'trend-mid' }));
   const points = items
     .map((it, i) => (it.brainFatigue == null ? null : `${x(i).toFixed(1)},${y(it.brainFatigue).toFixed(1)}`))
@@ -30,7 +31,7 @@ function renderTrend(items: MeasurementSummary[]): HTMLElement {
       svg('circle', { cx: x(i).toFixed(1), cy: y(it.brainFatigue).toFixed(1), r: 4, style: { fill: levelColor(it.fatigueLevel) }, class: 'trend-dot' }),
     );
   });
-  return el('section', { class: 'card' }, el('h2', { class: 'card-title' }, fmt(S.history.trend, { n })), chart);
+  return el('section', { class: 'card' }, el('h2', { class: 'card-title' }, title), chart);
 }
 
 function levelChip(level: number | null, labels: readonly string[]): HTMLElement {
@@ -71,7 +72,12 @@ export async function renderHistory(root: HTMLElement, _ctx: RouteContext, route
         },
         ...tid(TID.historyItem),
       },
-      el('div', { class: 'row-main' }, el('span', { class: 'row-date' }, formatDateTime(it.createdAt))),
+      el(
+        'div',
+        { class: 'row-main' },
+        el('span', { class: 'row-date' }, formatDateTime(it.createdAt)),
+        it.kind === 'synthetic' ? el('span', { class: 'chip chip-demo' }, S.common.demo) : null,
+      ),
       el(
         'div',
         { class: 'row-chips' },
@@ -88,12 +94,15 @@ export async function renderHistory(root: HTMLElement, _ctx: RouteContext, route
     const items = await db.listSummaries({ limit: 500 });
     listEl.replaceChildren();
     trendEl.replaceChildren();
-    countEl.textContent = fmt(S.history.count, { n: items.length });
+    countEl.hidden = items.length === 0;
+    countEl.textContent = items.length === 1 ? S.history.countOne : fmt(S.history.count, { n: items.length });
     if (items.length === 0) {
       listEl.append(el('p', { class: 'empty', ...tid(TID.historyEmpty) }, S.history.empty));
       return;
     }
-    trendEl.append(renderTrend(items.slice(0, TREND_N).reverse()));
+    // Demo (synthetic) records are listed but kept off the trend line.
+    const real = items.filter((it) => it.kind !== 'synthetic');
+    if (real.length > 0) trendEl.append(renderTrend(real.slice(0, TREND_N).reverse()));
     for (const it of items) listEl.append(row(it));
   }
 
@@ -121,7 +130,11 @@ export async function renderHistory(root: HTMLElement, _ctx: RouteContext, route
           throw new Error('not a fatigue-meter export');
         }
         const r = await db.importAll(parsed as ExportBundle, 'merge');
-        say(fmt(S.history.importDone, { added: r.added, skipped: r.skipped }));
+        say(
+          r.added === 1
+            ? fmt(S.history.importDoneOne, { skipped: r.skipped })
+            : fmt(S.history.importDone, { added: r.added, skipped: r.skipped }),
+        );
         await refresh();
       } catch (e) {
         console.warn('import failed', e);
