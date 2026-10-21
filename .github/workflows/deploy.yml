@@ -5,7 +5,8 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# One-time setup: repository Settings → Pages → Source: "GitHub Actions".
+# configure-pages enables the Pages site on first run (enablement: true), so no
+# manual Settings → Pages step is needed; the source becomes "GitHub Actions".
 permissions:
   contents: read
   pages: write
@@ -36,6 +37,8 @@ jobs:
           BASE_PATH: /${{ github.event.repository.name }}/
 
       - uses: actions/configure-pages@v5
+        with:
+          enablement: true
 
       - uses: actions/upload-pages-artifact@v3
         with:
