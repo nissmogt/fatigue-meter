@@ -308,6 +308,19 @@ describe('delete and clear', () => {
     expect(await db.getProfile()).toBeNull();
     expect(await db.getSettings()).toEqual(DEFAULT_SETTINGS);
   });
+
+  it('clearRecords removes measurements but keeps the profile and settings', async () => {
+    const db = await freshDb();
+    await db.putRecord(makeRecord({ id: 'a' }));
+    await db.putRecord(makeRecord({ id: 'b', createdAt: T0 + 1000 }));
+    await db.putProfile(PROFILE);
+    await db.putSettings({ measureSeconds: 120 });
+    await db.clearRecords();
+    expect(await db.countRecords()).toBe(0);
+    expect(await db.listSummaries()).toEqual([]);
+    expect(await db.getProfile()).toEqual(PROFILE);
+    expect((await db.getSettings()).measureSeconds).toBe(120);
+  });
 });
 
 describe('profile and settings', () => {

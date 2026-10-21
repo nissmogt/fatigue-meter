@@ -280,7 +280,8 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     }
     if (run !== runId || disposed) return;
     torchOn = on;
-    torchHint.hidden = on;
+    // The demo source has no torch; only a real camera rejection needs the hint.
+    torchHint.hidden = on || s.kind === 'synthetic';
   }
 
   function onSample(sample: Sample): void {

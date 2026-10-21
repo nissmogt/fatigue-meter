@@ -132,7 +132,7 @@ export async function renderHistory(root: HTMLElement, _ctx: RouteContext, route
 
   async function clearAll(): Promise<void> {
     if (!window.confirm(S.history.confirmClear)) return;
-    await db.clearAll();
+    await db.clearRecords();
     say(S.history.cleared);
     await refresh();
   }

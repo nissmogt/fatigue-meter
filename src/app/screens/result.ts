@@ -56,6 +56,10 @@ export async function renderResult(root: HTMLElement, ctx: RouteContext, router:
     levelWord: S.common.level,
     valueTestId: TID.resultFatigueScore,
     levelTestId: TID.resultFatigueLevel,
+    badge:
+      fatigueLevel != null && sc.fatigue.provisional
+        ? el('span', { class: 'badge' }, S.result.provisional)
+        : null,
     note: fatigueLevel == null ? S.result.needProfile : null,
   });
 

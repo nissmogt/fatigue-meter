@@ -46,6 +46,8 @@ export interface FatigueDb {
   latestScores(n: number, before?: number): Promise<Scores[]>;
   countRecords(): Promise<number>;
   deleteRecord(id: string): Promise<void>;
+  /** Delete every measurement (records + summaries) but keep profile and settings. */
+  clearRecords(): Promise<void>;
   clearAll(): Promise<void>;
   getProfile(): Promise<Profile | null>;
   putProfile(p: Profile | null): Promise<void>;
@@ -309,6 +311,13 @@ class IdbFatigueDb implements FatigueDb {
     return this.run([STORE_RECORDS, STORE_SUMMARIES], 'readwrite', (tx) => {
       tx.objectStore(STORE_RECORDS).delete(id);
       tx.objectStore(STORE_SUMMARIES).delete(id);
+    });
+  }
+
+  clearRecords(): Promise<void> {
+    return this.run([STORE_RECORDS, STORE_SUMMARIES], 'readwrite', (tx) => {
+      tx.objectStore(STORE_RECORDS).clear();
+      tx.objectStore(STORE_SUMMARIES).clear();
     });
   }
 
