@@ -5,8 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
-# configure-pages enables the Pages site on first run (enablement: true), so no
-# manual Settings → Pages step is needed; the source becomes "GitHub Actions".
+# One-time setup (needs repository admin, the workflow token cannot do it):
+# Settings → Pages → Build and deployment → Source: "GitHub Actions".
+# enablement: true below is best-effort only; it works when the token is allowed
+# to create the site, and is harmless once the site exists.
 permissions:
   contents: read
   pages: write
