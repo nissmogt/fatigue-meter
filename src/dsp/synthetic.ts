@@ -97,7 +97,7 @@ export const SYNTHETIC_DEFAULTS = {
   respAmpMod: 0.15,
   driftAmp: 3,
   driftHz: 0.05,
-  noiseSd: 0.3,
+  noiseSd: 0.2,
   jitterMs: 2,
   dropFraction: 0.02,
   quantStep: 1 / 16,

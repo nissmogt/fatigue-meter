@@ -86,7 +86,7 @@ export const DEFAULT_ANALYSIS_OPTIONS: AnalysisOptions = {
   fsUniform: 60,
   displayBand: [0.5, 4],
   peaks: { band: [0.5, 8], peakWindowS: 0.111, beatWindowS: 0.667, beatOffset: 0.02, minDelayS: 0.3 },
-  nn: { minMs: 300, maxMs: 2000, medianHalfWindow: 2, tolerance: 0.25 },
+  nn: { minMs: 300, maxMs: 2000, medianHalfWindow: 5, tolerance: 0.25 },
   spectrum: { ofac: 4, fMax: 0.5, lf: [0.04, 0.15], hf: [0.15, 0.4], detrend: 'linear' },
   quality: {
     minBeats: 40,
