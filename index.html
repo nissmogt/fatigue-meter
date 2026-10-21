@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#0f172a" />
+    <meta name="color-scheme" content="dark light" />
+    <meta
+      name="description"
+      content="Fingertip pulse-wave (PPG) fatigue and stress scan, computed entirely in your browser."
+    />
+    <link rel="icon" href="/icons/icon.svg" type="image/svg+xml" />
+    <title>Fatigue Meter</title>
+  </head>
+  <body>
+    <main id="app"></main>
+    <!--
+      The camera preview stays mounted for the whole session. Screens reparent
+      it; it is hidden with size/opacity, never display:none, because
+      requestVideoFrameCallback stalls on a non-rendered video.
+    -->
+    <video id="ppg-video" class="ppg-hidden" autoplay muted playsinline></video>
+    <noscript>Fatigue Meter needs JavaScript to run the pulse analysis in your browser.</noscript>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>

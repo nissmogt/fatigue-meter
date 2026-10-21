@@ -11,9 +11,11 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test",
+    "test:e2e:synthetic": "playwright test synthetic.spec.ts",
+    "test:e2e:camera": "playwright test measure.spec.ts",
     "typecheck": "tsc --noEmit",
-    "check": "npm run typecheck && npm run test",
-    "e2e:fixture": "node --experimental-strip-types tests/e2e/make-fixture.ts"
+    "typecheck:e2e": "tsc --noEmit --module esnext --moduleResolution bundler --target es2022 --strict --skipLibCheck --types node playwright.config.ts tests/e2e/y4m.ts tests/e2e/global-setup.ts tests/e2e/synthetic.spec.ts tests/e2e/measure.spec.ts",
+    "check": "npm run typecheck && npm run test"
   },
   "devDependencies": {
     "@playwright/test": "1.56.1",
