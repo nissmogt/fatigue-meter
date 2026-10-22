@@ -42,7 +42,10 @@ export interface SourceInfo {
   width: number;
   height: number;
   nominalFps: number;
-  timeBase: 'mediaTime' | 'performance';
+  /** Clock the samples are stamped with; decided from the first frames (see timebase.ts). */
+  timeBase: 'mediaTime' | 'captureTime' | 'presentationTime' | 'performance';
+  /** Why that clock was chosen (diagnostics). */
+  timeBaseReason?: string;
   capabilities: SourceCapabilities;
 }
 

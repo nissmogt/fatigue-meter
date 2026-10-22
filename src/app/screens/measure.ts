@@ -24,7 +24,7 @@ import { createCameraSource } from '../../capture/camera';
 import { createSyntheticSource } from '../../capture/synthetic';
 import { findRemembered, listRearCandidates, scanLenses, type LensScanResult } from '../../capture/lensScan';
 import type { CameraDevice } from '../../capture/source';
-import { setLastLensScan } from '../state';
+import { setLastLensScan, type LiveStats } from '../state';
 import { compareScores, scoreInputFromAnalysis, scoreMeasurement } from '../../scoring/score';
 import { buildComments } from '../../scoring/comments';
 import type { Scores } from '../../scoring/types';
@@ -157,6 +157,8 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   const qualityEl = el('span', { class: 'pill pill-none', ...tid(TID.measureQuality) }, S.common.notAvailable);
   const hrEl = el('span', { class: 'num-md', ...tid(TID.measureHr) }, S.common.notAvailable);
   const canvas = el('canvas', { class: 'wave', width: 320, height: 96, 'aria-hidden': 'true' });
+  // Live numbers for field debugging (Settings → "Show signal details").
+  const readoutEl = el('p', { class: 'readout', hidden: !settings.showSignalDetails }, '');
   const waveform = createWaveform(canvas);
   const torchHint = el('p', { class: 'hint-box', hidden: true }, S.measure.torchOff);
   const scanHint = el('p', { class: 'hint-box', hidden: true }, S.measure.scanHint);
@@ -192,6 +194,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     el('div', { class: 'countdown-wrap' }, countdownEl, el('span', { class: 'countdown-label' }, S.measure.remaining)),
     statusEl,
     canvas,
+    readoutEl,
     torchHint,
     scanHint,
     errorEl,
@@ -224,6 +227,8 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   /** Physical rear lenses found after permission; the lens line shows only with two or more. */
   let rearLenses: CameraDevice[] = [];
   let switching = false;
+  /** Most recent live snapshot, for the readout and the end-of-run diagnostics. */
+  let lastSnap: LiveSnapshot | null = null;
 
   /** The live region is written only on a change: setting equal text would still re-announce it. */
   function setStatus(text: string): void {
@@ -539,10 +544,47 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   }
 
   function updateLive(snap: LiveSnapshot): void {
+    lastSnap = snap;
     qualityEl.textContent = qualityLabel(snap.quality);
     qualityEl.className = `pill pill-${snap.quality}`;
     hrEl.textContent = snap.hrBpm != null && Number.isFinite(snap.hrBpm) ? String(Math.round(snap.hrBpm)) : S.common.notAvailable;
     waveform.draw(snap.wave);
+    if (settings.showSignalDetails) {
+      const st = liveStats();
+      if (st) {
+        readoutEl.textContent = fmt(S.measure.readout, {
+          fps: st.fps.toFixed(1),
+          base: st.timeBase || '?',
+          n: String(st.samples),
+          span: st.spanS.toFixed(1),
+          dc: st.dc.toFixed(0),
+          ac: st.ac.toFixed(2),
+          per: st.periodicity.toFixed(2),
+          corr: Number.isFinite(st.templateCorr) ? st.templateCorr.toFixed(2) : '—',
+          state: `${st.quality}/${st.fingerReason}/${st.channel}${st.clockStalls ? ` stalls ${st.clockStalls}` : ''}`,
+        });
+      }
+    }
+  }
+
+  /** The live numbers behind the readout; undefined before the first snapshot. */
+  function liveStats(): LiveStats | undefined {
+    const snap = lastSnap;
+    if (!snap) return undefined;
+    return {
+      fps: source?.deliveredFps() ?? 0,
+      timeBase: info?.timeBase ?? '',
+      samples: snap.samples,
+      spanS: snap.spanS,
+      dc: snap.dc,
+      ac: snap.ac,
+      periodicity: snap.periodicity,
+      templateCorr: snap.templateCorr,
+      quality: snap.quality,
+      fingerReason: snap.fingerReason,
+      channel: snap.channel,
+      clockStalls: 0,
+    };
   }
 
   /** True when the source reports any lockable control (Chrome Android); iOS and the demo report none. */
@@ -694,6 +736,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
       setDiagnostics({
         at: Date.now(),
         capture: captureMeta(deliveredFps),
+        lastLive: liveStats(),
         verdict: reasons.length ? 'fail' : null,
         reasons: [...reasons],
         fsSource: null,
@@ -727,6 +770,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     const diag: Diagnostics = {
       at: Date.now(),
       capture,
+      lastLive: liveStats(),
       verdict: analysis.quality.verdict,
       reasons: [...analysis.quality.reasons],
       fsSource: analysis.fsSource,

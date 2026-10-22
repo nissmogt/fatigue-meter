@@ -193,6 +193,11 @@ export interface LiveSnapshot {
   /** Peak-to-peak of the chosen channel over the window (8-bit units). */
   ac: number;
   dc: number;
+  /** Autocorrelation at the pulse lag (0..1); 0 before a wave exists. */
+  periodicity: number;
+  /** Samples in the window and the time they span (seconds). */
+  samples: number;
+  spanS: number;
   /** Mean beat-template correlation over the window (NaN when fewer than 3 full beats). */
   templateCorr: number;
 }

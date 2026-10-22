@@ -45,6 +45,14 @@ function diagnosticsPanel(d: Diagnostics | null): HTMLElement {
     [L.locked, yn(c.locked)],
     [L.duration, `${formatNumber(c.durationS, 1)} s`],
     [L.timeBase, c.timeBase || S.common.notAvailable],
+    ...(d.lastLive
+      ? ([
+          [
+            S.settings.lastLiveTitle,
+            `fps ${formatNumber(d.lastLive.fps, 1)} · ${d.lastLive.samples} samples / ${formatNumber(d.lastLive.spanS, 1)} s · level ${formatNumber(d.lastLive.dc, 0)} · pulse ${formatNumber(d.lastLive.ac, 2)} · periodicity ${formatNumber(d.lastLive.periodicity, 2)} · corr ${Number.isFinite(d.lastLive.templateCorr) ? formatNumber(d.lastLive.templateCorr, 2) : S.common.notAvailable} · ${d.lastLive.quality}/${d.lastLive.fingerReason}/${d.lastLive.channel}`,
+          ],
+        ] as Array<[string, string]>)
+      : []),
     [L.verdict, d.verdict ?? S.common.notAvailable],
     [L.reasons, d.reasons.length ? d.reasons.join(', ') : S.common.notAvailable],
     [L.fsSource, d.fsSource != null ? `${formatNumber(d.fsSource, 0)} Hz` : S.common.notAvailable],
@@ -107,6 +115,12 @@ export async function renderSettings(root: HTMLElement, _ctx: RouteContext, _rou
     checked: settings.showStressT,
     onchange: () => void save({ showStressT: showStressT.checked }),
   });
+  const showSignalDetails = el('input', {
+    type: 'checkbox',
+    id: 'settings-signal-details',
+    checked: settings.showSignalDetails,
+    onchange: () => void save({ showSignalDetails: showSignalDetails.checked }),
+  });
 
   let knownDevices: CameraDevice[] = [];
   const storedName = settings.preferredCameraLabel || (settings.preferredCameraId ? settings.preferredCameraId.slice(0, 8) : '');
@@ -163,6 +177,7 @@ export async function renderSettings(root: HTMLElement, _ctx: RouteContext, _rou
       lengthGroup,
       el('label', { class: 'check', for: 'settings-keep-raw' }, keepRaw, el('span', null, S.settings.keepRaw)),
       el('label', { class: 'check', for: 'settings-stress-t' }, showStressT, el('span', null, S.settings.showStressT)),
+      el('label', { class: 'check', for: 'settings-signal-details' }, showSignalDetails, el('span', null, S.settings.showSignalDetails)),
     ),
     el(
       'section',

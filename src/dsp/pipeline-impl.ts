@@ -275,6 +275,9 @@ export function analyzePPG(series: SampleSeries, opts?: Partial<AnalysisOptions>
 export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' | Channel = 'auto'): LiveSnapshot {
   const n = series.length;
   const fs = 60;
+  // Window bookkeeping for the readout; filled in once the window is known.
+  let winSamples = 0;
+  let winSpan = 0;
   const none = (reason: FingerReason, ch: Channel, dc = 0, ac = 0): LiveSnapshot => ({
     fingerOn: reason === 'ok' || reason === 'moving',
     fingerReason: reason,
@@ -286,12 +289,17 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
     ac,
     dc,
     templateCorr: NaN,
+    periodicity: 0,
+    samples: winSamples,
+    spanS: winSpan,
   });
   if (n === 0) return none('no-finger', 'g');
   const tEnd = series.t[n - 1];
   const [i0, i1] = indexRange(series.t, tEnd - windowS, tEnd + 1e-6);
   const win = subSeries(series, i0, i1);
   const m = win.length;
+  winSamples = m;
+  winSpan = m > 1 ? win.t[m - 1] - win.t[0] : 0;
   if (m < 4) return none('no-finger', 'g');
 
   // Finger presence from the last ~0.5 s of means.
@@ -319,6 +327,9 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
   const x = channelOf(win, ch);
   const { t, x: xd } = dedupeTimes(win.t, x);
   const span = t.length ? t[t.length - 1] - t[0] : 0;
+  // Distinct, increasing stamps only: a frozen clock shows up here as a tiny span.
+  winSamples = t.length;
+  winSpan = span;
   // Pulse amplitude first: the motion threshold scales with it, because on a
   // brightly lit lens the beats themselves swing the 1-s means by many levels.
   let ac = 0;
@@ -390,6 +401,9 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
     ac,
     dc: r,
     templateCorr: tmplCorr,
+    periodicity: per.r,
+    samples: t.length,
+    spanS: span,
   };
 }
 

@@ -4,17 +4,22 @@
  * requestAnimationFrame fallback: for a MediaStream, `currentTime` is a wall
  * clock in Gecko and WebKit (the only engines that ever lacked rVFC), so a rAF
  * loop cannot tell camera frames apart and would silently defeat the
- * drop-frame gate and the low-fps guard. The time base is the frame's
- * mediaTime, chosen once in start() and never mixed within a session.
+ * drop-frame gate and the low-fps guard.
+ *
+ * The time base is chosen once per session from the first frames
+ * (see timebase.ts): mediaTime where it advances, otherwise captureTime,
+ * presentationTime or the callback clock. Frames seen before the decision are
+ * held back and emitted on the chosen base, so a series never mixes clocks.
  */
 import type { Sample } from '../dsp/types';
 import { CROP_FRACTION, GRID_SIZE, LOW_FPS_WINDOW_S, SATURATION_LEVEL } from './config';
 import { SourceError } from './source';
+import { chooseTimeBase, isDecidable, stampSeconds, type FrameStamps, type TimeBase } from './timebase';
+
+export type { TimeBase } from './timebase';
 
 /** Only 'rvfc' is produced; 'raf' remains in the union for records stored by earlier builds. */
 export type FrameLoop = 'rvfc' | 'raf';
-/** Only 'mediaTime' is produced; 'performance' remains for records stored by earlier builds. */
-export type TimeBase = 'mediaTime' | 'performance';
 
 export interface SamplerOptions {
   cropFraction?: number;
@@ -24,14 +29,21 @@ export interface SamplerOptions {
 
 export interface Sampler {
   /**
-   * Picks the frame loop and time base (once per start) and begins delivering
-   * samples. Throws SourceError('unsupported') when the element has no
+   * Begins delivering samples. The returned time base is provisional; the
+   * decided one is available from timeBase() once the first sample was
+   * emitted. Throws SourceError('unsupported') when the element has no
    * requestVideoFrameCallback.
    */
   start(video: HTMLVideoElement, onSample: (s: Sample) => void): { loop: FrameLoop; timeBase: TimeBase };
   stop(): void;
   /** Frames delivered per second over the last LOW_FPS_WINDOW_S seconds (0 when stopped). */
   deliveredFps(): number;
+  /** The clock samples are stamped with; null until decided. */
+  timeBase(): TimeBase | null;
+  /** Why that clock was chosen (diagnostics). */
+  timeBaseReason(): string;
+  /** Frames whose stamp did not advance after the decision (diagnostics). */
+  clockStalls(): number;
   readonly running: boolean;
 }
 
@@ -47,6 +59,15 @@ export function supportsFrameCallback(video: HTMLVideoElement): boolean {
 /** Ring size for frame timestamps: covers the fps window at up to 120 fps. */
 const STAMP_RING = 512;
 
+interface PendingFrame {
+  stamps: FrameStamps;
+  r: number;
+  g: number;
+  b: number;
+  sat: number;
+  frame: number;
+}
+
 class FrameSampler implements Sampler {
   private readonly grid: number;
   private readonly cropFraction: number;
@@ -59,6 +80,11 @@ class FrameSampler implements Sampler {
   private readonly stamps = new Float64Array(STAMP_RING);
   private head = 0;
   private count = 0;
+  private base: TimeBase | null = null;
+  private baseReason = '';
+  private pending: PendingFrame[] = [];
+  private lastT = -Infinity;
+  private stalls = 0;
   running = false;
 
   constructor(opts: SamplerOptions) {
@@ -87,6 +113,11 @@ class FrameSampler implements Sampler {
     this.running = true;
     this.head = 0;
     this.count = 0;
+    this.base = null;
+    this.baseReason = '';
+    this.pending = [];
+    this.lastT = -Infinity;
+    this.stalls = 0;
     this.startedAt = performance.now();
     this.rvfcHandle = video.requestVideoFrameCallback(this.onVideoFrame);
     return { loop: 'rvfc', timeBase: 'mediaTime' };
@@ -102,6 +133,7 @@ class FrameSampler implements Sampler {
     this.rvfcHandle = 0;
     this.video = null;
     this.onSample = null;
+    this.pending = [];
   }
 
   deliveredFps(): number {
@@ -120,19 +152,37 @@ class FrameSampler implements Sampler {
     return n / (span / 1000);
   }
 
+  timeBase(): TimeBase | null {
+    return this.base;
+  }
+
+  timeBaseReason(): string {
+    return this.baseReason;
+  }
+
+  clockStalls(): number {
+    return this.stalls;
+  }
+
   private readonly onVideoFrame = (_now: DOMHighResTimeStamp, meta: VideoFrameCallbackMetadata): void => {
     const video = this.video;
     if (!this.running || !video) return;
     // Re-register first so a throw in process() cannot silently end the loop.
     this.rvfcHandle = video.requestVideoFrameCallback(this.onVideoFrame);
-    this.process(meta.mediaTime, meta.presentedFrames);
+    const captureTime = (meta as VideoFrameCallbackMetadata & { captureTime?: number }).captureTime;
+    const stamps: FrameStamps = {
+      mediaTime: meta.mediaTime,
+      presentationTime: meta.presentationTime,
+      now: performance.now(),
+    };
+    if (typeof captureTime === 'number') stamps.captureTime = captureTime;
+    this.process(stamps, meta.presentedFrames);
   };
 
-  private process(t: number, frame: number): void {
+  private process(stamps: FrameStamps, frame: number): void {
     const video = this.video;
     const ctx = this.ctx;
-    const onSample = this.onSample;
-    if (!video || !ctx || !onSample) return;
+    if (!video || !ctx || !this.onSample) return;
     const vw = video.videoWidth;
     const vh = video.videoHeight;
     if (vw === 0 || vh === 0) return;
@@ -160,9 +210,32 @@ class FrameSampler implements Sampler {
       if (rv >= lvl) sat++;
     }
     const n = grid * grid;
-    this.stamps[this.head] = performance.now();
+    this.stamps[this.head] = stamps.now;
     this.head = (this.head + 1) % STAMP_RING;
     if (this.count < STAMP_RING) this.count++;
-    onSample({ t, r: r / n, g: g / n, b: b / n, sat: sat / n, frame });
+    const frameOut = { stamps, r: r / n, g: g / n, b: b / n, sat: sat / n, frame };
+    if (this.base === null) {
+      this.pending.push(frameOut);
+      const decision = chooseTimeBase(this.pending.map((p) => p.stamps));
+      if (!decision && !isDecidable(this.pending.map((p) => p.stamps))) return;
+      const chosen = decision ?? { base: 'performance' as TimeBase, reason: 'undecidable frames; callback time' };
+      this.base = chosen.base;
+      this.baseReason = chosen.reason;
+      const held = this.pending;
+      this.pending = [];
+      for (const p of held) this.emit(p);
+      return;
+    }
+    this.emit(frameOut);
+  }
+
+  private emit(p: PendingFrame): void {
+    const onSample = this.onSample;
+    const base = this.base;
+    if (!onSample || base === null) return;
+    const t = stampSeconds(p.stamps, base);
+    if (t <= this.lastT) this.stalls++;
+    else this.lastT = t;
+    onSample({ t, r: p.r, g: p.g, b: p.b, sat: p.sat, frame: p.frame });
   }
 }

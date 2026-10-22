@@ -1018,3 +1018,13 @@ pre.error {
   padding: 6px 12px;
   font-size: 0.9rem;
 }
+
+/* Live signal readout (Settings → Show signal details) */
+.readout {
+  margin: 0;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.72rem;
+  line-height: 1.4;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+}

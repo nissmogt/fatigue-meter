@@ -109,6 +109,7 @@ export const S = {
     lensLabel: 'Lens',
     switchLens: 'Switch lens',
     lensUnknown: 'Unknown lens',
+    readout: 'fps {fps} · clock {base} · {n} samples / {span} s · level {dc} · pulse {ac} · periodicity {per} · corr {corr} · {state}',
     settling: 'Good signal. Hold still…',
     qualityNone: 'No signal',
     qualityLabel: 'Signal',
@@ -211,6 +212,8 @@ export const S = {
     lensRedetect: 'Detect the best lens again',
     lensRedetectHint: 'Forgets the remembered lens; the next measurement tries every rear lens again.',
     lensScanTitle: 'Last lens scan',
+    showSignalDetails: 'Show signal details on the measurement screen',
+    lastLiveTitle: 'Last live signal',
     lensNone: 'Detected lens: none yet (the next measurement scans the rear lenses).',
     lensScanNone: 'No scan has run yet.',
     lensReasons: {

@@ -515,6 +515,7 @@ const SETTING_GUARDS: { [K in keyof Settings]: (v: unknown) => v is Settings[K] 
   preferredCameraId: (v): v is string | null => v === null || typeof v === 'string',
   preferredCameraLabel: (v): v is string | null => v === null || typeof v === 'string',
   showStressT: (v): v is boolean => typeof v === 'boolean',
+  showSignalDetails: (v): v is boolean => typeof v === 'boolean',
 };
 
 /** `patch` keys that are known and well-typed override `base`; anything else is ignored. */

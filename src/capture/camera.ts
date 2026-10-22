@@ -399,7 +399,9 @@ class CameraSource implements SampleSource {
       width: settings.width ?? video.videoWidth,
       height: settings.height ?? video.videoHeight,
       nominalFps: settings.frameRate ?? this.opts.idealFps ?? IDEAL_FPS,
-      timeBase,
+      // The first sample is emitted only after the clock was decided, so this is final.
+      timeBase: this.sampler.timeBase() ?? timeBase,
+      timeBaseReason: this.sampler.timeBaseReason(),
       capabilities: {
         torch: caps.torch === true,
         exposureLock: hasManual(caps.exposureMode),

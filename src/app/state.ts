@@ -201,9 +201,27 @@ export interface LensScanEntry {
   reason?: string;
 }
 
+/** Live-signal numbers at the end of a run (settings diagnostics). */
+export interface LiveStats {
+  fps: number;
+  timeBase: string;
+  samples: number;
+  spanS: number;
+  dc: number;
+  ac: number;
+  periodicity: number;
+  templateCorr: number;
+  quality: string;
+  fingerReason: string;
+  channel: string;
+  clockStalls: number;
+}
+
 export interface Diagnostics {
   at: number;
   capture: CaptureMeta;
+  /** Last live readout before the run ended, when available. */
+  lastLive?: LiveStats;
   verdict: string | null;
   reasons: string[];
   fsSource: number | null;

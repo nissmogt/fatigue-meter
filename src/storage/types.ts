@@ -60,6 +60,8 @@ export interface Settings {
   /** Label of the preferred lens; iOS rotates device ids per page load, so the label is the durable key. */
   preferredCameraLabel: string | null;
   showStressT: boolean;
+  /** Show the live signal readout (fps, clock, amplitude, periodicity, correlation) on the measurement screen. */
+  showSignalDetails: boolean;
 }
 
 export const DEFAULT_SETTINGS: Settings = {
@@ -68,6 +70,7 @@ export const DEFAULT_SETTINGS: Settings = {
   preferredCameraId: null,
   preferredCameraLabel: null,
   showStressT: false,
+  showSignalDetails: false,
 };
 
 export interface ExportBundle {
