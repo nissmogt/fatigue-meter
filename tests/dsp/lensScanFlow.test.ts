@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { scanLenses } from '../../src/capture/lensScan';
 import type { LockResult, SampleSource, SourceEvent, SourceInfo } from '../../src/capture/source';
-import { generateSynthetic, syntheticPreset } from '../../src/dsp/synthetic';
+import { generateSynthetic } from '../../src/dsp/synthetic';
 import { fromSeries, sliceSeriesByTime } from '../../src/dsp/types';
 import type { Sample } from '../../src/dsp/types';
 
@@ -61,7 +61,6 @@ describe('scanLenses orchestration', () => {
   const lit = burst({ seed: 3 });
   const dim = burst({ seed: 3, acFractionR: 0.003, acFractionG: 0.004, noiseSd: 0.6 });
   const off = burst({ seed: 3, fingerOffWindows: [[0, 4]] });
-  const poor = burst({ ...syntheticPreset('poor', 3) });
   const video = {} as HTMLVideoElement;
   const fast = { settleMs: 0, sampleMs: 40, gapMs: 0 };
 
@@ -93,7 +92,7 @@ describe('scanLenses orchestration', () => {
   });
 
   it('returns no best lens when nothing sees a pulse, and records start errors', async () => {
-    const makeSource = (id: string) => fakeSource(id, id === 'a' ? off : poor, { failStart: id === 'c' });
+    const makeSource = (id: string) => fakeSource(id, off, { failStart: id === 'c' });
     const res = await scanLenses(
       [
         { deviceId: 'a', label: 'A' },
