@@ -513,6 +513,7 @@ const SETTING_GUARDS: { [K in keyof Settings]: (v: unknown) => v is Settings[K] 
   measureSeconds: (v): v is 60 | 120 => v === 60 || v === 120,
   keepRawSeries: (v): v is boolean => typeof v === 'boolean',
   preferredCameraId: (v): v is string | null => v === null || typeof v === 'string',
+  preferredCameraLabel: (v): v is string | null => v === null || typeof v === 'string',
   showStressT: (v): v is boolean => typeof v === 'boolean',
 };
 

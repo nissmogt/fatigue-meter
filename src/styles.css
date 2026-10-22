@@ -978,3 +978,25 @@ pre.error {
     transition: none !important;
   }
 }
+
+/* Lens-scan panel (settings) */
+.card-subtitle {
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: var(--muted);
+  margin: 12px 0 6px;
+}
+.diag-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  font-size: 0.9rem;
+}
+.diag-list li {
+  padding: 4px 0;
+  border-bottom: 1px solid var(--border, rgba(128, 128, 128, 0.25));
+}
+.diag-list li.chosen {
+  font-weight: 600;
+  color: var(--good);
+}

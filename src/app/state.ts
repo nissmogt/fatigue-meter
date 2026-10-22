@@ -188,6 +188,17 @@ export function sourceChoiceFromQuery(q: URLSearchParams): SourceChoice | null {
 
 // --- Diagnostics of the last capture (settings panel) -----------------------------
 
+/** One lens tried by the lens scan (settings diagnostics). */
+export interface LensScanEntry {
+  label: string;
+  score: number;
+  fingerFraction: number;
+  ac: number;
+  periodicity: number;
+  dc: number;
+  chosen: boolean;
+}
+
 export interface Diagnostics {
   at: number;
   capture: CaptureMeta;
@@ -196,6 +207,19 @@ export interface Diagnostics {
   fsSource: number | null;
   dropFraction: number | null;
   error: string | null;
+  /** Result of the most recent lens scan, if one ran. */
+  lensScan?: LensScanEntry[];
+}
+
+const LENS_SCAN_KEY = 'fatigue-meter.lensScan';
+
+export function setLastLensScan(entries: LensScanEntry[]): void {
+  writeJson(LENS_SCAN_KEY, entries);
+}
+
+export function getLastLensScan(): LensScanEntry[] | null {
+  const v = readJson<LensScanEntry[]>(LENS_SCAN_KEY);
+  return Array.isArray(v) ? v : null;
 }
 
 export function setDiagnostics(d: Diagnostics): void {

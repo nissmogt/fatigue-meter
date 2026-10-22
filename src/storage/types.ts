@@ -57,6 +57,8 @@ export interface Settings {
   measureSeconds: 60 | 120;
   keepRawSeries: boolean;
   preferredCameraId: string | null;
+  /** Label of the preferred lens; iOS rotates device ids per page load, so the label is the durable key. */
+  preferredCameraLabel: string | null;
   showStressT: boolean;
 }
 
@@ -64,6 +66,7 @@ export const DEFAULT_SETTINGS: Settings = {
   measureSeconds: 60,
   keepRawSeries: true,
   preferredCameraId: null,
+  preferredCameraLabel: null,
   showStressT: false,
 };
 

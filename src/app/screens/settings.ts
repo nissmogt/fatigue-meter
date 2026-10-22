@@ -2,9 +2,30 @@ import { S } from '../../strings';
 import { TID } from '../testids';
 import type { RouteContext, Router } from '../router';
 import { listCameras } from '../../capture/camera';
+import type { CameraDevice } from '../../capture/source';
 import type { Settings } from '../../storage/types';
-import { getDb, getDiagnostics, type Diagnostics } from '../state';
+import { getDb, getDiagnostics, getLastLensScan, type Diagnostics, type LensScanEntry } from '../state';
 import { button, el, fmt, formatDateTime, formatNumber, link, tid, topbar } from '../../ui/dom';
+
+function lensScanPanel(entries: LensScanEntry[] | null): HTMLElement | null {
+  if (!entries || entries.length === 0) return null;
+  return el(
+    'div',
+    { class: 'lens-scan' },
+    el('h3', { class: 'card-subtitle' }, S.settings.lensScanTitle),
+    el(
+      'ul',
+      { class: 'diag-list' },
+      entries.map((e) =>
+        el(
+          'li',
+          { class: e.chosen ? 'chosen' : undefined },
+          `${e.label}: ${formatNumber(e.score, 2)} (pulse ${formatNumber(e.ac, 1)}, periodicity ${formatNumber(e.periodicity, 2)}, finger ${Math.round(e.fingerFraction * 100)}%)${e.chosen ? ' ✓' : ''}`,
+        ),
+      ),
+    ),
+  );
+}
 
 function diagnosticsPanel(d: Diagnostics | null): HTMLElement {
   if (!d) return el('p', { class: 'muted' }, S.settings.diagNone);
@@ -84,25 +105,48 @@ export async function renderSettings(root: HTMLElement, _ctx: RouteContext, _rou
     onchange: () => void save({ showStressT: showStressT.checked }),
   });
 
+  let knownDevices: CameraDevice[] = [];
+  const storedName = settings.preferredCameraLabel || (settings.preferredCameraId ? settings.preferredCameraId.slice(0, 8) : '');
+  const detectedEl = el('p', { class: 'field-hint', hidden: !storedName }, storedName ? fmt(S.settings.cameraDetected, { label: storedName }) : '');
   const cameraSelect = el(
     'select',
-    { id: 'settings-camera', onchange: () => void save({ preferredCameraId: cameraSelect.value || null }) },
+    {
+      id: 'settings-camera',
+      onchange: () => {
+        const id = cameraSelect.value || null;
+        const label = id ? (knownDevices.find((d) => d.deviceId === id)?.label ?? null) : null;
+        detectedEl.hidden = !id;
+        if (id) detectedEl.textContent = fmt(S.settings.cameraDetected, { label: label || id.slice(0, 8) });
+        void save({ preferredCameraId: id, preferredCameraLabel: label });
+      },
+    },
     el('option', { value: '' }, S.settings.cameraAuto),
   );
   if (settings.preferredCameraId) {
     // Keep the stored choice selectable even before the device list arrives.
-    cameraSelect.append(el('option', { value: settings.preferredCameraId }, settings.preferredCameraId.slice(0, 8)));
+    cameraSelect.append(el('option', { value: settings.preferredCameraId }, storedName));
     cameraSelect.value = settings.preferredCameraId;
   }
+  const redetectBtn = button(
+    S.settings.lensRedetect,
+    () => {
+      cameraSelect.value = '';
+      detectedEl.hidden = true;
+      void save({ preferredCameraId: null, preferredCameraLabel: null });
+    },
+    { class: 'btn-secondary' },
+  );
   void listCameras()
     .then((devices) => {
+      knownDevices = devices;
       const current = settings.preferredCameraId ?? '';
       cameraSelect.replaceChildren(el('option', { value: '' }, S.settings.cameraAuto));
       devices.forEach((d, i) => {
         cameraSelect.append(el('option', { value: d.deviceId }, d.label || fmt(S.settings.cameraUnknown, { n: i + 1 })));
       });
       if (current && !devices.some((d) => d.deviceId === current)) {
-        cameraSelect.append(el('option', { value: current }, current.slice(0, 8)));
+        // The id rotated (iOS) or the device is gone; the label still identifies it.
+        cameraSelect.append(el('option', { value: current }, storedName));
       }
       cameraSelect.value = current;
     })
@@ -122,7 +166,10 @@ export async function renderSettings(root: HTMLElement, _ctx: RouteContext, _rou
       'section',
       { class: 'card' },
       el('h2', { class: 'card-title' }, S.settings.camera),
-      el('div', { class: 'field' }, el('label', { for: 'settings-camera' }, S.settings.camera), cameraSelect, el('p', { class: 'field-hint' }, S.settings.cameraHint)),
+      el('div', { class: 'field' }, el('label', { for: 'settings-camera' }, S.settings.camera), cameraSelect, detectedEl, el('p', { class: 'field-hint' }, S.settings.cameraHint)),
+      el('p', null, redetectBtn),
+      el('p', { class: 'field-hint' }, S.settings.lensRedetectHint),
+      lensScanPanel(getLastLensScan()),
     ),
     el(
       'section',

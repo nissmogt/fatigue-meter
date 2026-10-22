@@ -44,12 +44,16 @@ Any HTTPS tunnel to the dev server works, for example `npx localtunnel --port 51
 | --- | --- | --- | --- | --- |
 | Chrome / Edge on Android | yes | yes | yes (`exposureMode`, `focusMode`, `whiteBalanceMode: manual`) | Best signal. |
 | Samsung Internet | yes | usually | partial | Depends on the device. |
-| Safari on iOS 17.4+ (tab or home screen) | yes | yes | no | Torch via `applyConstraints`; the camera picker avoids the virtual Dual/Triple/Ultra Wide devices. |
+| Safari on iOS 17.4+ (tab or home screen) | yes | yes | no | Torch via `applyConstraints`. On multi-lens iPhones the first measurement runs a lens scan (see below) because only the lens next to the flash is lit through the fingertip. |
 | Safari on iOS < 17.4 | yes | no | no | Ambient-light mode: face a bright lamp or window so light shines through the fingertip (iOS refuses Control Centre flashlight while a page holds the camera). |
 | Firefox on Android | yes | no | no | Ambient-light mode only. |
 | Desktop browsers | webcam | no | no | Works for development; a webcam gives a weak signal. Use the demo in Settings. |
 
 Without a torch the app falls back to **ambient mode**: it still looks for a red, pulsing fingertip but needs light coming through the finger (face a lamp or a window).
+
+### Lens scan on multi-lens phones
+
+The flash light has to pass through the fingertip into the lens, so only the lens next to the flash gets a usable signal: on an iPhone 14 Pro that is the telephoto, while a plain "rear camera" request returns the 1x main lens on the far side of the cluster. A web page cannot read the phone model, so the first camera measurement tries every physical rear lens once with the torch on (about 4 s per lens), scores the pulse each one sees (finger presence, pulse amplitude and periodicity), and remembers the winner by device id **and** label (iOS issues new ids on every page load). Settings shows the detected lens, lets you override it, and has a "Detect the best lens again" button; the last scan's scores appear there as well. Keep one fingertip flat over the whole lens cluster and the flash while the scan runs.
 
 ### Measurement tips
 

@@ -22,6 +22,9 @@ import type { AnalysisResult, GateReason, LiveSnapshot } from '../../dsp/pipelin
 import { SourceError, type LockResult, type SampleSource, type SourceEvent, type SourceInfo } from '../../capture/source';
 import { createCameraSource } from '../../capture/camera';
 import { createSyntheticSource } from '../../capture/synthetic';
+import { findRemembered, listRearCandidates, scanLenses, type LensScanResult } from '../../capture/lensScan';
+import type { CameraDevice } from '../../capture/source';
+import { setLastLensScan } from '../state';
 import { compareScores, scoreInputFromAnalysis, scoreMeasurement } from '../../scoring/score';
 import { buildComments } from '../../scoring/comments';
 import type { Scores } from '../../scoring/types';
@@ -40,9 +43,9 @@ import {
   type SourceChoice,
 } from '../state';
 import { createWaveform } from '../../ui/waveform';
-import { append, button, el, tid, topbar } from '../../ui/dom';
+import { append, button, el, fmt, tid, topbar } from '../../ui/dom';
 
-type Phase = 'idle' | 'starting' | 'placing-finger' | 'settling' | 'measuring' | 'analysing' | 'done' | 'failed';
+type Phase = 'idle' | 'starting' | 'scanning' | 'placing-finger' | 'settling' | 'measuring' | 'analysing' | 'done' | 'failed';
 type LockState = 'none' | 'pending' | 'done';
 
 const SETTLE_S = 2; // continuous good signal before the locks are requested / the clock starts
@@ -69,7 +72,7 @@ function getVideo(): HTMLVideoElement {
   return v;
 }
 
-function makeSource(choice: SourceChoice, settings: Settings): SampleSource {
+function makeSource(choice: SourceChoice, settings: Settings, deviceId: string | null): SampleSource {
   if (choice.kind === 'synthetic') {
     return createSyntheticSource({
       seed: choice.seed,
@@ -80,7 +83,7 @@ function makeSource(choice: SourceChoice, settings: Settings): SampleSource {
       durationS: choice.fingerOffWindows ? settings.measureSeconds * 2 + 40 : undefined,
     });
   }
-  return createCameraSource({ deviceId: settings.preferredCameraId ?? undefined });
+  return createCameraSource({ deviceId: deviceId ?? undefined });
 }
 
 function startErrorMessage(e: unknown): string {
@@ -156,6 +159,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   const canvas = el('canvas', { class: 'wave', width: 320, height: 96, 'aria-hidden': 'true' });
   const waveform = createWaveform(canvas);
   const torchHint = el('p', { class: 'hint-box', hidden: true }, S.measure.torchOff);
+  const scanHint = el('p', { class: 'hint-box', hidden: true }, S.measure.scanHint);
   const tipsEl = el(
     'section',
     { class: 'tips' },
@@ -185,6 +189,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     statusEl,
     canvas,
     torchHint,
+    scanHint,
     errorEl,
     el('div', { class: 'btn-col' }, startBtn, retryBtn, cancelBtn),
     tipsEl,
@@ -210,6 +215,8 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   let timer: number | null = null;
   let finishing = false;
   let runId = 0;
+  /** Remembered lens; iOS rotates device ids per page load, so the label is matched too. */
+  const prefs = { id: settings.preferredCameraId, label: settings.preferredCameraLabel };
 
   /** The live region is written only on a change: setting equal text would still re-announce it. */
   function setStatus(text: string): void {
@@ -221,6 +228,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     if (status !== undefined) setStatus(status);
     root.dataset.phase = p;
     tipsEl.hidden = !(p === 'idle' || p === 'placing-finger' || p === 'failed');
+    scanHint.hidden = p !== 'scanning';
   }
 
   function stopTimer(): void {
@@ -296,7 +304,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     waveform.clear();
     setPhase('starting', S.measure.starting);
 
-    const s = makeSource(choice, settings);
+    const s = makeSource(choice, settings, prefs.id);
     source = s;
     unsubscribes.push(s.onSample(onSample), s.onEvent(onEvent));
     try {
@@ -313,19 +321,122 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
       return;
     }
 
+    // Multi-lens phones: continue on the remembered lens or find the best one.
+    let active: SampleSource = s;
+    if (s.kind === 'camera') {
+      const chosen = await selectLens(run);
+      if (!chosen) return; // superseded, cancelled or failed (already reported)
+      active = chosen;
+    }
+
     setPhase('placing-finger', S.measure.placeFinger);
     timer = window.setInterval(tick, TICK_MS);
 
     let on = false;
     try {
-      on = await s.setTorch(true);
+      on = await active.setTorch(true);
     } catch {
       on = false;
     }
     if (run !== runId || disposed) return;
     torchOn = on;
     // The demo source has no torch; only a real camera rejection needs the hint.
-    torchHint.hidden = on || s.kind === 'synthetic';
+    torchHint.hidden = on || active.kind === 'synthetic';
+  }
+
+  /**
+   * Fingertip PPG only works on the lens next to the flash, and a plain rear
+   * camera request returns the 1x lens, which on Pro-class phones sits away
+   * from the flash. The device model is not readable from a page, so the lens
+   * is chosen by signal: the remembered lens is reused (matched by id, then by
+   * label because iOS rotates ids), otherwise every physical rear lens is tried
+   * once with the torch on and the one that sees the pulse best is kept.
+   * Returns the source to continue with, or null when this run was superseded,
+   * cancelled or failed (fail() has then been reported already).
+   */
+  async function selectLens(run: number): Promise<SampleSource | null> {
+    let devices: CameraDevice[] = [];
+    try {
+      devices = await listRearCandidates();
+    } catch {
+      devices = [];
+    }
+    if (run !== runId || disposed) return null;
+    const current = info?.deviceId ?? null;
+    const remembered = findRemembered(devices, prefs.id, prefs.label);
+    if (remembered) {
+      if (remembered.deviceId !== prefs.id || (remembered.label && remembered.label !== prefs.label)) {
+        prefs.id = remembered.deviceId;
+        prefs.label = remembered.label || prefs.label;
+        db.putSettings({ preferredCameraId: prefs.id, preferredCameraLabel: prefs.label }).catch((e) => console.warn('settings save failed', e));
+      }
+      if (current && remembered.deviceId !== current) return restartWith(remembered.deviceId, run);
+      return source;
+    }
+    if (devices.length < 2) return source;
+
+    await stopSource();
+    if (run !== runId || disposed) return null;
+    samples = [];
+    setPhase('scanning', fmt(S.measure.scanning, { n: 1, total: devices.length }));
+    let result: LensScanResult = { best: null, scores: [], aborted: false };
+    try {
+      result = await scanLenses(devices, video, {
+        onProgress: (i, total) => setStatus(fmt(S.measure.scanning, { n: i + 1, total })),
+        shouldAbort: () => run !== runId || disposed,
+      });
+    } catch (e) {
+      console.warn('lens scan failed', e);
+    }
+    if (result.aborted || run !== runId || disposed) return null;
+    setLastLensScan(
+      result.scores.map((sc) => ({
+        label: sc.label || sc.deviceId.slice(0, 8),
+        score: sc.score,
+        fingerFraction: sc.fingerFraction,
+        ac: sc.ac,
+        periodicity: sc.periodicity,
+        dc: sc.dc,
+        chosen: result.best?.deviceId === sc.deviceId,
+      })),
+    );
+    if (result.best) {
+      prefs.id = result.best.deviceId;
+      prefs.label = result.best.label || null;
+      try {
+        await db.putSettings({ preferredCameraId: prefs.id, preferredCameraLabel: prefs.label });
+      } catch (e) {
+        console.warn('settings save failed', e);
+      }
+      if (run !== runId || disposed) return null;
+      setStatus(fmt(S.measure.scanDone, { label: result.best.label || fmt(S.settings.cameraUnknown, { n: 1 }) }));
+    } else {
+      setStatus(S.measure.scanNone);
+    }
+    return restartWith(result.best?.deviceId ?? null, run);
+  }
+
+  /** Replace the running camera source by one on `deviceId` (null = browser default). */
+  async function restartWith(deviceId: string | null, run: number): Promise<SampleSource | null> {
+    await stopSource();
+    if (run !== runId || disposed) return null;
+    samples = [];
+    info = null;
+    const s2 = createCameraSource({ deviceId: deviceId ?? undefined });
+    source = s2;
+    unsubscribes.push(s2.onSample(onSample), s2.onEvent(onEvent));
+    try {
+      info = await s2.start(video);
+    } catch (e) {
+      if (run !== runId || disposed) return null;
+      await fail(startErrorMessage(e));
+      return null;
+    }
+    if (run !== runId || disposed) {
+      void s2.stop();
+      return null;
+    }
+    return s2;
   }
 
   function onSample(sample: Sample): void {
@@ -359,7 +470,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   }
 
   function isActive(): boolean {
-    return phase === 'starting' || phase === 'placing-finger' || phase === 'settling' || phase === 'measuring';
+    return phase === 'starting' || phase === 'scanning' || phase === 'placing-finger' || phase === 'settling' || phase === 'measuring';
   }
 
   function updateLive(snap: LiveSnapshot): void {
