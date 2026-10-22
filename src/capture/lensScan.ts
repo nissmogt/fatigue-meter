@@ -8,33 +8,39 @@
  * winner is remembered by id and label (iOS rotates device ids per page load).
  */
 import { butterworthBandpass, filtfilt, mean } from '../dsp/filters';
-import { chooseChannel, liveSnapshot } from '../dsp/pipeline-impl';
 import { periodicity, robustRange } from '../dsp/quality';
 import { dedupeTimes, resampleSpline } from '../dsp/resample';
-import type { Sample, SampleSeries } from '../dsp/types';
+import type { Channel, Sample, SampleSeries } from '../dsp/types';
 import { channelOf, toSeries } from '../dsp/types';
 import { createCameraSource, listCameras } from './camera';
 import type { CameraDevice, SampleSource } from './source';
 
+export type LensReason = 'ok' | 'no-finger' | 'saturated' | 'dark' | 'weak' | 'error';
+
 export interface LensScore {
   deviceId: string;
   label: string;
-  /** 0..1; 0 when no finger was seen. */
+  /** 0..1; 0 when no finger was seen or every channel is saturated. */
   score: number;
   /** Fraction of the sampled window with a finger detected. */
   fingerFraction: number;
-  /** Robust peak-to-peak of the band-passed pulse (8-bit levels). */
+  /** Robust peak-to-peak of the band-passed pulse (8-bit levels) on the chosen channel. */
   ac: number;
   /** Autocorrelation at the pulse lag (0..1). */
   periodicity: number;
   /** Mean of the chosen channel (8-bit levels). */
   dc: number;
+  /** Channel the score was computed on. */
+  channel: Channel;
+  /** True when red (or green) clipped: the lens sits right at the flash. */
+  saturated: boolean;
+  reason: LensReason;
   samples: number;
   error: string | null;
 }
 
 export interface LensScanOptions {
-  /** Wall-clock settle after the torch request before sampling. */
+  /** Wall-clock settle after the torch request before sampling (auto-exposure adapts to the covered lens). */
   settleMs?: number;
   /** Length of the scored window. */
   sampleMs?: number;
@@ -60,7 +66,13 @@ const VIRTUAL_LABEL = /dual|triple/i;
 /** Upper bound on lenses tried, to keep the one-time scan short. */
 const MAX_CANDIDATES = 4;
 /** Below this score a lens is treated as "no usable pulse". */
-export const MIN_USABLE_SCORE = 0.15;
+export const MIN_USABLE_SCORE = 0.08;
+/** A channel mean at or above this is clipped and carries no pulse. */
+const CHANNEL_SATURATED = 245;
+/** A channel mean below this is too dark to carry a pulse. */
+const CHANNEL_DARK = 15;
+/** Multiplier applied when the lens clips a channel (right at the flash); still usable on the others. */
+const SATURATION_PENALTY = 0.7;
 
 /** Rear physical lenses, labels permitting; call after camera permission was granted. */
 export function rearCandidates(devices: readonly CameraDevice[]): CameraDevice[] {
@@ -97,12 +109,40 @@ export function findRemembered(
   return null;
 }
 
+/**
+ * Finger over the lens, judged per 1-s slice with a scan-specific rule: a
+ * covered lens is red-dominant (torch or ambient) OR pink-white when it sits
+ * right at the flash (red clipped, green high). The live detector's stricter
+ * rule would call the brightest lens "no finger" and lose exactly the lens we
+ * are looking for.
+ */
+function sliceHasFinger(r: number, g: number, b: number): boolean {
+  const sum = r + g + b;
+  if (sum <= 0) return false;
+  const rr = r / sum;
+  const lum = 0.299 * r + 0.587 * g + 0.114 * b;
+  if (lum < CHANNEL_DARK) return false;
+  if (rr >= 0.33 && r > g) return true;
+  return r >= CHANNEL_SATURATED && g >= 100;
+}
+
+type Scored = Omit<LensScore, 'deviceId' | 'label' | 'error'>;
+
 /** Score the pulse visible in a sampled window (pure; unit-tested). */
-export function scoreLensSeries(series: SampleSeries): Omit<LensScore, 'deviceId' | 'label' | 'error'> {
+export function scoreLensSeries(series: SampleSeries): Scored {
   const n = series.length;
-  const empty = { score: 0, fingerFraction: 0, ac: 0, periodicity: 0, dc: n ? mean(series.r) : 0, samples: n };
-  if (n < 8) return empty;
-  // Finger presence over the window: the live detector on 1-s slices.
+  const base: Scored = {
+    score: 0,
+    fingerFraction: 0,
+    ac: 0,
+    periodicity: 0,
+    dc: n ? mean(series.r) : 0,
+    channel: 'g',
+    saturated: false,
+    reason: 'no-finger',
+    samples: n,
+  };
+  if (n < 8) return base;
   const t0 = series.t[0];
   const t1 = series.t[n - 1];
   let fingerSlices = 0;
@@ -111,33 +151,80 @@ export function scoreLensSeries(series: SampleSeries): Omit<LensScore, 'deviceId
     const e = Math.min(t1, s + 1);
     if (e - s < 0.5) break;
     slices++;
-    const idx: Sample[] = [];
+    let sr = 0;
+    let sg = 0;
+    let sb = 0;
+    let c = 0;
     for (let i = 0; i < n; i++) {
       if (series.t[i] >= s && series.t[i] < e) {
-        idx.push({ t: series.t[i], r: series.r[i], g: series.g[i], b: series.b[i], sat: series.sat[i], frame: series.frame[i] });
+        sr += series.r[i];
+        sg += series.g[i];
+        sb += series.b[i];
+        c++;
       }
     }
-    if (idx.length >= 3 && liveSnapshot(toSeries(idx), 1).fingerOn) fingerSlices++;
+    if (c >= 3 && sliceHasFinger(sr / c, sg / c, sb / c)) fingerSlices++;
   }
   const fingerFraction = slices ? fingerSlices / slices : 0;
+  const mr = mean(series.r);
+  const mg = mean(series.g);
+  const mb = mean(series.b);
+  const satR = mean(series.sat) > 0.3 || mr >= CHANNEL_SATURATED;
+  const satG = mg >= CHANNEL_SATURATED;
+  const satB = mb >= CHANNEL_SATURATED;
+  const lum = 0.299 * mr + 0.587 * mg + 0.114 * mb;
+  if (fingerFraction < 0.5) return { ...base, fingerFraction, saturated: satR, reason: 'no-finger' };
+  if (lum < CHANNEL_DARK) return { ...base, fingerFraction, reason: 'dark' };
+
+  // Candidate channels: unsaturated and not dark; the best by periodicity x amplitude wins.
   const fs = 60;
-  const choice = chooseChannel(series, fs, [0.5, 4]);
-  const x = channelOf(series, choice.channel);
-  const dc = mean(x);
-  const { t, x: xd } = dedupeTimes(series.t, x);
-  if (t.length < 8 || t[t.length - 1] - t[0] < 1.5) return { ...empty, fingerFraction, dc };
-  const u = resampleSpline(t, xd, fs);
-  const inv = new Float64Array(u.y.length);
-  for (let i = 0; i < inv.length; i++) inv[i] = -u.y[i];
-  const y = filtfilt(inv, butterworthBandpass(fs, 0.5, 4), fs);
-  const ac = robustRange(y);
-  const per = periodicity(y, fs).r;
-  // Periodicity is the signal-to-noise proxy; a very small swing is penalised
-  // because it will not survive real finger pressure variation.
-  const amplitudeFactor = Math.min(1, ac / 1.5);
-  const brightnessOk = dc >= 40 && dc <= 250;
-  const score = fingerFraction < 0.5 || !brightnessOk ? 0 : per * amplitudeFactor;
-  return { score, fingerFraction, ac, periodicity: per, dc, samples: n };
+  const all: Array<{ ch: Channel; m: number }> = [
+    { ch: 'g', m: mg },
+    { ch: 'r', m: mr },
+    { ch: 'b', m: mb },
+  ];
+  const candidates = all.filter((c) => c.m >= CHANNEL_DARK && (c.ch === 'r' ? !satR : c.ch === 'g' ? !satG : !satB));
+  if (candidates.length === 0) {
+    return { ...base, fingerFraction, dc: mr, saturated: true, reason: 'saturated' };
+  }
+  const { t } = dedupeTimes(series.t, series.r);
+  if (t.length < 8 || t[t.length - 1] - t[0] < 1.5) return { ...base, fingerFraction, reason: 'weak' };
+  let bestCh: Channel = candidates[0].ch;
+  let bestPer = 0;
+  let bestAc = 0;
+  let bestDc = candidates[0].m;
+  let bestVal = -1;
+  for (const c of candidates) {
+    const x = channelOf(series, c.ch);
+    const d = dedupeTimes(series.t, x);
+    const u = resampleSpline(d.t, d.x, fs);
+    const inv = new Float64Array(u.y.length);
+    for (let i = 0; i < inv.length; i++) inv[i] = -u.y[i];
+    const y = filtfilt(inv, butterworthBandpass(fs, 0.5, 4), fs);
+    const ac = robustRange(y);
+    const per = periodicity(y, fs).r;
+    const val = per * Math.min(1, ac / 1.5);
+    if (val > bestVal) {
+      bestVal = val;
+      bestCh = c.ch;
+      bestPer = per;
+      bestAc = ac;
+      bestDc = c.m;
+    }
+  }
+  const saturated = satR || satG;
+  const score = Math.max(0, bestVal) * (saturated ? SATURATION_PENALTY : 1);
+  return {
+    score,
+    fingerFraction,
+    ac: bestAc,
+    periodicity: bestPer,
+    dc: bestDc,
+    channel: bestCh,
+    saturated,
+    reason: score >= MIN_USABLE_SCORE ? 'ok' : 'weak',
+    samples: n,
+  };
 }
 
 function delay(ms: number): Promise<void> {
@@ -150,9 +237,9 @@ export async function scanLenses(
   video: HTMLVideoElement,
   o: LensScanOptions = {},
 ): Promise<LensScanResult> {
-  const settleMs = o.settleMs ?? 1200;
-  const sampleMs = o.sampleMs ?? 2500;
-  const gapMs = o.gapMs ?? 250;
+  const settleMs = o.settleMs ?? 2000;
+  const sampleMs = o.sampleMs ?? 3000;
+  const gapMs = o.gapMs ?? 300;
   const makeSource = o.makeSource ?? ((deviceId: string) => createCameraSource({ deviceId }));
   const scores: LensScore[] = [];
   const abort = () => o.shouldAbort?.() === true;
@@ -192,6 +279,9 @@ export async function scanLenses(
         ac: 0,
         periodicity: 0,
         dc: 0,
+        channel: 'g',
+        saturated: false,
+        reason: 'error',
         samples: samples.length,
         error,
       });

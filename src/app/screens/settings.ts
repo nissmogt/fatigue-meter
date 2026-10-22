@@ -7,22 +7,25 @@ import type { Settings } from '../../storage/types';
 import { getDb, getDiagnostics, getLastLensScan, type Diagnostics, type LensScanEntry } from '../state';
 import { button, el, fmt, formatDateTime, formatNumber, link, tid, topbar } from '../../ui/dom';
 
-function lensScanPanel(entries: LensScanEntry[] | null): HTMLElement | null {
-  if (!entries || entries.length === 0) return null;
+function lensScanPanel(entries: LensScanEntry[] | null): HTMLElement {
+  const title = el('h3', { class: 'card-subtitle' }, S.settings.lensScanTitle);
+  if (!entries || entries.length === 0) return el('div', { class: 'lens-scan' }, title, el('p', { class: 'muted small' }, S.settings.lensScanNone));
+  const reasons = S.settings.lensReasons as Record<string, string>;
   return el(
     'div',
     { class: 'lens-scan' },
-    el('h3', { class: 'card-subtitle' }, S.settings.lensScanTitle),
+    title,
     el(
       'ul',
       { class: 'diag-list' },
-      entries.map((e) =>
-        el(
+      entries.map((e) => {
+        const why = e.reason ? reasons[e.reason] ?? e.reason : '';
+        return el(
           'li',
           { class: e.chosen ? 'chosen' : undefined },
-          `${e.label}: ${formatNumber(e.score, 2)} (pulse ${formatNumber(e.ac, 1)}, periodicity ${formatNumber(e.periodicity, 2)}, finger ${Math.round(e.fingerFraction * 100)}%)${e.chosen ? ' ✓' : ''}`,
-        ),
-      ),
+          `${e.label}: ${formatNumber(e.score, 2)}${why ? ` · ${why}` : ''} (pulse ${formatNumber(e.ac, 1)}, periodicity ${formatNumber(e.periodicity, 2)}, finger ${Math.round(e.fingerFraction * 100)}%, level ${Math.round(e.dc)})${e.chosen ? ' ✓' : ''}`,
+        );
+      }),
     ),
   );
 }
@@ -107,7 +110,7 @@ export async function renderSettings(root: HTMLElement, _ctx: RouteContext, _rou
 
   let knownDevices: CameraDevice[] = [];
   const storedName = settings.preferredCameraLabel || (settings.preferredCameraId ? settings.preferredCameraId.slice(0, 8) : '');
-  const detectedEl = el('p', { class: 'field-hint', hidden: !storedName }, storedName ? fmt(S.settings.cameraDetected, { label: storedName }) : '');
+  const detectedEl = el('p', { class: 'field-hint lens-detected' }, storedName ? fmt(S.settings.cameraDetected, { label: storedName }) : S.settings.lensNone);
   const cameraSelect = el(
     'select',
     {
@@ -115,8 +118,7 @@ export async function renderSettings(root: HTMLElement, _ctx: RouteContext, _rou
       onchange: () => {
         const id = cameraSelect.value || null;
         const label = id ? (knownDevices.find((d) => d.deviceId === id)?.label ?? null) : null;
-        detectedEl.hidden = !id;
-        if (id) detectedEl.textContent = fmt(S.settings.cameraDetected, { label: label || id.slice(0, 8) });
+        detectedEl.textContent = id ? fmt(S.settings.cameraDetected, { label: label || id.slice(0, 8) }) : S.settings.lensNone;
         void save({ preferredCameraId: id, preferredCameraLabel: label });
       },
     },
@@ -131,7 +133,7 @@ export async function renderSettings(root: HTMLElement, _ctx: RouteContext, _rou
     S.settings.lensRedetect,
     () => {
       cameraSelect.value = '';
-      detectedEl.hidden = true;
+      detectedEl.textContent = S.settings.lensNone;
       void save({ preferredCameraId: null, preferredCameraLabel: null });
     },
     { class: 'btn-secondary' },

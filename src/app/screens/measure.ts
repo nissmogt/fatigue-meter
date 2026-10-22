@@ -160,6 +160,9 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   const waveform = createWaveform(canvas);
   const torchHint = el('p', { class: 'hint-box', hidden: true }, S.measure.torchOff);
   const scanHint = el('p', { class: 'hint-box', hidden: true }, S.measure.scanHint);
+  const lensNameEl = el('span', { class: 'lens-name' }, '');
+  const switchBtn = button(S.measure.switchLens, () => void switchLens(), { class: 'btn-secondary btn-small', hidden: true });
+  const lensLine = el('p', { class: 'lens-line', hidden: true }, el('span', { class: 'live-label' }, S.measure.lensLabel), lensNameEl, switchBtn);
   const tipsEl = el(
     'section',
     { class: 'tips' },
@@ -185,6 +188,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
         el('div', { class: 'live-row' }, el('span', { class: 'live-label' }, S.measure.hrLabel), hrEl, el('span', { class: 'unit' }, S.common.bpm)),
       ),
     ),
+    lensLine,
     el('div', { class: 'countdown-wrap' }, countdownEl, el('span', { class: 'countdown-label' }, S.measure.remaining)),
     statusEl,
     canvas,
@@ -217,6 +221,9 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
   let runId = 0;
   /** Remembered lens; iOS rotates device ids per page load, so the label is matched too. */
   const prefs = { id: settings.preferredCameraId, label: settings.preferredCameraLabel };
+  /** Physical rear lenses found after permission; the lens line shows only with two or more. */
+  let rearLenses: CameraDevice[] = [];
+  let switching = false;
 
   /** The live region is written only on a change: setting equal text would still re-announce it. */
   function setStatus(text: string): void {
@@ -229,6 +236,51 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     root.dataset.phase = p;
     tipsEl.hidden = !(p === 'idle' || p === 'placing-finger' || p === 'failed');
     scanHint.hidden = p !== 'scanning';
+    updateLensLine();
+  }
+
+  /** Name the lens in use and offer a switch while the finger is being placed. */
+  function updateLensLine(): void {
+    const multi = rearLenses.length >= 2;
+    lensLine.hidden = !multi || choice.kind === 'synthetic';
+    lensNameEl.textContent = info?.label || S.measure.lensUnknown;
+    switchBtn.hidden = !multi || !(phase === 'placing-finger' || phase === 'settling') || switching;
+  }
+
+  /** Cycle to the next rear lens by hand and remember it (the scan is a heuristic; this always works). */
+  async function switchLens(): Promise<void> {
+    if (switching || rearLenses.length < 2 || !(phase === 'placing-finger' || phase === 'settling')) return;
+    const run = runId;
+    switching = true;
+    updateLensLine();
+    try {
+      const current = info?.deviceId ?? prefs.id;
+      const idx = rearLenses.findIndex((d) => d.deviceId === current);
+      const next = rearLenses[(idx + 1) % rearLenses.length];
+      goodSince = null;
+      lockDoneAt = null;
+      lockState = 'none';
+      lock = null;
+      setStatus(S.measure.starting);
+      const s2 = await restartWith(next.deviceId, run);
+      if (!s2) return;
+      prefs.id = next.deviceId;
+      prefs.label = next.label || null;
+      db.putSettings({ preferredCameraId: prefs.id, preferredCameraLabel: prefs.label }).catch((e) => console.warn('settings save failed', e));
+      let on = false;
+      try {
+        on = await s2.setTorch(true);
+      } catch {
+        on = false;
+      }
+      if (run !== runId || disposed) return;
+      torchOn = on;
+      torchHint.hidden = on;
+      setPhase('placing-finger', S.measure.placeFinger);
+    } finally {
+      switching = false;
+      updateLensLine();
+    }
   }
 
   function stopTimer(): void {
@@ -362,6 +414,8 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
       devices = [];
     }
     if (run !== runId || disposed) return null;
+    rearLenses = devices;
+    updateLensLine();
     const current = info?.deviceId ?? null;
     const remembered = findRemembered(devices, prefs.id, prefs.label);
     if (remembered) {
@@ -388,18 +442,22 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     } catch (e) {
       console.warn('lens scan failed', e);
     }
+    // Keep whatever was measured, even on abort: it is the only evidence a user can report.
+    if (result.scores.length > 0) {
+      setLastLensScan(
+        result.scores.map((sc) => ({
+          label: sc.label || sc.deviceId.slice(0, 8),
+          score: sc.score,
+          fingerFraction: sc.fingerFraction,
+          ac: sc.ac,
+          periodicity: sc.periodicity,
+          dc: sc.dc,
+          chosen: result.best?.deviceId === sc.deviceId,
+          reason: sc.reason,
+        })),
+      );
+    }
     if (result.aborted || run !== runId || disposed) return null;
-    setLastLensScan(
-      result.scores.map((sc) => ({
-        label: sc.label || sc.deviceId.slice(0, 8),
-        score: sc.score,
-        fingerFraction: sc.fingerFraction,
-        ac: sc.ac,
-        periodicity: sc.periodicity,
-        dc: sc.dc,
-        chosen: result.best?.deviceId === sc.deviceId,
-      })),
-    );
     if (result.best) {
       prefs.id = result.best.deviceId;
       prefs.label = result.best.label || null;
@@ -410,10 +468,16 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
       }
       if (run !== runId || disposed) return null;
       setStatus(fmt(S.measure.scanDone, { label: result.best.label || fmt(S.settings.cameraUnknown, { n: 1 }) }));
-    } else {
-      setStatus(S.measure.scanNone);
+      return restartWith(result.best.deviceId, run);
     }
-    return restartWith(result.best?.deviceId ?? null, run);
+    // Nothing qualified: continue on the lens that at least saw a finger with
+    // the strongest (if weak) pulse, so the user is not sent to the 1x lens on
+    // the far side of the flash; the Switch lens button covers the rest.
+    const fallback = result.scores
+      .filter((sc) => sc.fingerFraction >= 0.5 && sc.error === null)
+      .sort((a, b) => b.score - a.score)[0];
+    setStatus(S.measure.scanNone);
+    return restartWith(fallback?.deviceId ?? null, run);
   }
 
   /** Replace the running camera source by one on `deviceId` (null = browser default). */
@@ -447,6 +511,7 @@ export async function renderMeasure(root: HTMLElement, ctx: RouteContext, router
     switch (e.type) {
       case 'started':
         info = e.info;
+        updateLensLine();
         break;
       case 'torch':
         torchOn = e.on;

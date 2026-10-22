@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import { scanLenses } from '../../src/capture/lensScan';
 import type { LockResult, SampleSource, SourceEvent, SourceInfo } from '../../src/capture/source';
-import { generateSynthetic } from '../../src/dsp/synthetic';
+import { generateSynthetic, syntheticPreset } from '../../src/dsp/synthetic';
 import { fromSeries, sliceSeriesByTime } from '../../src/dsp/types';
 import type { Sample } from '../../src/dsp/types';
 
@@ -61,6 +61,7 @@ describe('scanLenses orchestration', () => {
   const lit = burst({ seed: 3 });
   const dim = burst({ seed: 3, acFractionR: 0.003, acFractionG: 0.004, noiseSd: 0.6 });
   const off = burst({ seed: 3, fingerOffWindows: [[0, 4]] });
+  const clipped = burst({ ...syntheticPreset('saturated', 3) });
   const video = {} as HTMLVideoElement;
   const fast = { settleMs: 0, sampleMs: 40, gapMs: 0 };
 
@@ -105,6 +106,21 @@ describe('scanLenses orchestration', () => {
     expect(res.best).toBeNull();
     expect(res.scores).toHaveLength(3);
     expect(res.scores[2].error).toMatch(/cannot open c/);
+  });
+
+  it('prefers a red-clipped lens at the flash over a dim lens far from it', async () => {
+    const makeSource = (id: string) => fakeSource(id, id === 'tele' ? clipped : dim);
+    const res = await scanLenses(
+      [
+        { deviceId: 'wide', label: 'Back Camera' },
+        { deviceId: 'tele', label: 'Back Telephoto Camera' },
+      ],
+      video,
+      { ...fast, makeSource },
+    );
+    expect(res.best?.deviceId).toBe('tele');
+    expect(res.scores[1].saturated).toBe(true);
+    expect(res.scores[1].reason).toBe('ok');
   });
 
   it('aborts between lenses when asked', async () => {

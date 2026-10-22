@@ -258,3 +258,22 @@ describe('liveSnapshot', () => {
     expect(snap2.quality).not.toBe('good');
   });
 });
+
+describe('liveSnapshot on a lens right at the flash (red clipped)', () => {
+  it('still sees the finger, scores the green channel and reaches good quality', () => {
+    const syn = generateSynthetic({ ...syntheticPreset('saturated', 21), durationS: 20 });
+    const snap = liveSnapshot(syn.series, 8);
+    expect(snap.fingerOn).toBe(true);
+    expect(snap.fingerReason).toBe('ok');
+    expect(snap.channel).toBe('g');
+    expect(snap.quality).toBe('good');
+  });
+
+  it('tolerates a strong pulse: the motion threshold scales with amplitude', () => {
+    const strong = generateSynthetic({ seed: 22, durationS: 20, acFractionR: 0.15, acFractionG: 0.3 });
+    const snap = liveSnapshot(strong.series, 8);
+    expect(snap.ac).toBeGreaterThan(15);
+    expect(snap.fingerReason).toBe('ok');
+    expect(snap.quality).toBe('good');
+  });
+});

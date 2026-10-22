@@ -70,3 +70,27 @@ describe('rear candidates and remembered lens', () => {
     expect(findRemembered(iphonePro, null, null)).toBeNull();
   });
 });
+
+describe('lens scan with a clipped (saturated) lens', () => {
+  it('scores a red-saturated lens on green instead of discarding it', () => {
+    const sat = generateSynthetic({ ...syntheticPreset('saturated', 4), durationS: 4 });
+    const s = scoreLensSeries(sliceSeriesByTime(sat.series, 1, 3.5));
+    expect(s.fingerFraction).toBeGreaterThanOrEqual(0.5);
+    expect(s.saturated).toBe(true);
+    expect(s.channel).toBe('g');
+    expect(s.reason).toBe('ok');
+    expect(s.score).toBeGreaterThan(MIN_USABLE_SCORE);
+  });
+
+  it('reports every-channel saturation and a missing finger with reasons', () => {
+    const sat = generateSynthetic({ ...syntheticPreset('saturated', 4), durationS: 4 });
+    const slice = sliceSeriesByTime(sat.series, 1, 3.5);
+    slice.g.fill(255);
+    slice.b.fill(255);
+    const s = scoreLensSeries(slice);
+    expect(s.reason).toBe('saturated');
+    expect(s.score).toBe(0);
+    const off = generateSynthetic({ seed: 5, durationS: 4, fingerOffWindows: [[0, 4]] });
+    expect(scoreLensSeries(sliceSeriesByTime(off.series, 1, 3.5)).reason).toBe('no-finger');
+  });
+});

@@ -197,6 +197,8 @@ export interface LensScanEntry {
   periodicity: number;
   dc: number;
   chosen: boolean;
+  /** Why the lens did or did not qualify ('ok', 'no-finger', 'saturated', 'dark', 'weak', 'error'). */
+  reason?: string;
 }
 
 export interface Diagnostics {

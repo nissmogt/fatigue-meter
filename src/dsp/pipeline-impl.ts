@@ -35,6 +35,8 @@ const LIVE_RED_MIN = 60;
 const LIVE_LUM_MIN = 15;
 const LIVE_LUM_MAX = 240;
 const LIVE_STEP_LEVELS = 10;
+/** Upper bound on live pulse amplitude (8-bit levels); a lens at the flash can swing 60+. */
+const LIVE_AC_MAX = 120;
 
 export function mergeOptions(opts?: Partial<AnalysisOptions>): AnalysisOptions {
   if (!opts) return DEFAULT_ANALYSIS_OPTIONS;
@@ -67,7 +69,12 @@ export function chooseChannel(series: SampleSeries, fs: number, band: [number, n
   const sat = mean(series.sat);
   const redUsable = sat < RED_SAT_FRACTION && mr < RED_SAT_MEAN && mr >= GREEN_TOO_DARK;
   const greenUsable = mg >= GREEN_TOO_DARK;
-  if (!redUsable && !greenUsable) return { channel: 'g', reason: 'neither channel usable' };
+  if (!redUsable && !greenUsable) {
+    // Right at the flash both red and green can clip; blue is weak but unclipped.
+    const mb = mean(series.b);
+    if (mb >= GREEN_TOO_DARK && mb < RED_SAT_MEAN) return { channel: 'b', reason: 'red and green saturated, blue fallback' };
+    return { channel: 'g', reason: 'neither channel usable' };
+  }
   if (!redUsable) return { channel: 'g', reason: 'red saturated or dark' };
   if (!greenUsable) return { channel: 'r', reason: 'green too dark' };
   const qg = channelSnr(series, 'g', fs, band);
@@ -299,17 +306,35 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
   let reason: FingerReason = 'ok';
   const torchLike = rr >= LIVE_RED_RATIO_TORCH && r >= LIVE_RED_MIN && r <= 254.5 && g > 0 && r / g >= 1.5;
   const ambientLike = rr >= LIVE_RED_RATIO_AMBIENT && r > g && g > b && lum >= LIVE_LUM_MIN && lum <= LIVE_LUM_MAX;
-  if (sat > 0.5 && g > 245) reason = 'saturated';
+  // A lens right at the flash is pink-white (red clipped, green high): still a
+  // covered lens, scored on green or blue. Only a fully clipped image is unusable.
+  const brightCovered = r >= 245 && g >= 100;
+  if (sat > 0.5 && g > 245 && b > 245) reason = 'saturated';
   else if (rr >= LIVE_RED_RATIO_AMBIENT && r > g && lum < LIVE_LUM_MIN) reason = 'too-dark';
-  else if (!(torchLike || ambientLike)) reason = 'no-finger';
+  else if (!(torchLike || ambientLike || brightCovered)) reason = 'no-finger';
 
   const ch: Channel = channel === 'auto' ? chooseChannel(win, fs, DEFAULT_ANALYSIS_OPTIONS.displayBand).channel : channel;
   if (reason !== 'ok') return none(reason, ch, r, 0);
 
-  // Motion / pressure change: compare consecutive 1-s means and single-frame jumps.
   const x = channelOf(win, ch);
+  const { t, x: xd } = dedupeTimes(win.t, x);
+  const span = t.length ? t[t.length - 1] - t[0] : 0;
+  // Pulse amplitude first: the motion threshold scales with it, because on a
+  // brightly lit lens the beats themselves swing the 1-s means by many levels.
+  let ac = 0;
+  let yd: Float64Array | null = null;
+  let inv: Float64Array | null = null;
+  if (t.length >= 8 && span >= 3) {
+    const u = resampleSpline(t, xd, fs);
+    inv = new Float64Array(u.y.length);
+    for (let i = 0; i < inv.length; i++) inv[i] = -u.y[i];
+    yd = filtfilt(inv, butterworthBandpass(fs, 0.5, 4), fs);
+    ac = robustRange(yd);
+  }
+  const stepLevels = Math.max(LIVE_STEP_LEVELS, 0.5 * ac);
+  // Motion / pressure change: compare consecutive 1-s means and single-frame jumps.
   let step = false;
-  for (let i = 1; i < m; i++) if (Math.abs(x[i] - x[i - 1]) > LIVE_STEP_LEVELS) step = true;
+  for (let i = 1; i < m; i++) if (Math.abs(x[i] - x[i - 1]) > stepLevels) step = true;
   const secMeans: number[] = [];
   let s = 0;
   let c = 0;
@@ -325,19 +350,12 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
     c++;
   }
   if (c) secMeans.push(s / c);
-  for (let i = 1; i < secMeans.length; i++) if (Math.abs(secMeans[i] - secMeans[i - 1]) > LIVE_STEP_LEVELS) step = true;
-  const recentStep = step && secMeans.length >= 2 && Math.abs(secMeans[secMeans.length - 1] - secMeans[secMeans.length - 2]) > LIVE_STEP_LEVELS;
+  for (let i = 1; i < secMeans.length; i++) if (Math.abs(secMeans[i] - secMeans[i - 1]) > stepLevels) step = true;
+  const recentStep = step && secMeans.length >= 2 && Math.abs(secMeans[secMeans.length - 1] - secMeans[secMeans.length - 2]) > stepLevels;
 
-  const { t, x: xd } = dedupeTimes(win.t, x);
-  const span = t.length ? t[t.length - 1] - t[0] : 0;
-  if (t.length < 8 || span < 3) {
+  if (yd === null || inv === null) {
     return { ...none(recentStep ? 'moving' : 'ok', ch, r, 0), quality: 'poor' };
   }
-  const u = resampleSpline(t, xd, fs);
-  const inv = new Float64Array(u.y.length);
-  for (let i = 0; i < inv.length; i++) inv[i] = -u.y[i];
-  const yd = filtfilt(inv, butterworthBandpass(fs, 0.5, 4), fs);
-  const ac = robustRange(yd);
   const per = periodicity(yd, fs);
   const yDet = filtfilt(inv, butterworthBandpass(fs, 0.5, 8), fs);
   const peaks = detectSystolicPeaks(yDet, { fs, ...DEFAULT_ANALYSIS_OPTIONS.peaks });
@@ -355,7 +373,7 @@ export function liveSnapshot(series: SampleSeries, windowS = 8, channel: 'auto' 
   const good =
     !recentStep &&
     ac >= 0.25 &&
-    ac <= 60 &&
+    ac <= LIVE_AC_MAX &&
     per.r >= 0.5 &&
     hr !== null &&
     hr >= 40 &&

@@ -1000,3 +1000,21 @@ pre.error {
   font-weight: 600;
   color: var(--good);
 }
+
+/* Lens line on the measurement screen */
+.lens-line {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 0.95rem;
+}
+.lens-line .lens-name {
+  font-weight: 600;
+}
+.lens-line .btn-small {
+  min-height: 36px;
+  padding: 6px 12px;
+  font-size: 0.9rem;
+}
